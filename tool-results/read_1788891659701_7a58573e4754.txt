@@ -1,0 +1,1121 @@
+     1→/**
+     2→ * Server-only YouTube Music client (music.youtube.com internal "Innertube" API).
+     3→ *
+     4→ * Fetches LIVE data from YouTube Music: search (songs/videos/artists/albums/
+     5→ * playlists), the home feed (new releases, trending), artist pages (top songs,
+     6→ * discography, about), albums, playlists, and track metadata for a bare videoId.
+     7→ *
+     8→ * Playback note: audio for YouTube Music tracks is streamed live through the
+     9→ * YouTube IFrame player in the browser (see lib/playback/yt-engine.ts). This
+    10→ * module resolves metadata only. For videos that forbid embedding, the app
+    11→ * falls back to /api/yt/stream/[videoId], which resolves a direct audio URL
+    12→ * via open-source tooling (yt-dlp + bgutil POT provider / Invidious) and
+    13→ * proxies it server-side. Every external entity is tagged `source: 'youtube'`.
+    14→ *
+    15→ * This module must only be imported from server code (API routes).
+    16→ */
+    17→
+    18→import sharp from 'sharp';
+    19→import type {
+    20→  AlbumDTO,
+    21→  AlbumDetailDTO,
+    22→  ArtistDTO,
+    23→  ArtistDetailDTO,
+    24→  PlaylistDTO,
+    25→  PlaylistDetailDTO,
+    26→  SearchDTO,
+    27→  ShelfDTO,
+    28→  ShelfItem,
+    29→  TrackDTO,
+    30→} from './types';
+    31→
+    32→/* ------------------------------ constants ------------------------------- */
+    33→
+    34→const INNERTUBE_BASE = 'https://music.youtube.com/youtubei/v1';
+    35→const INNERTUBE_KEY = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
+    36→const CONTEXT = {
+    37→  context: {
+    38→    client: { clientName: 'WEB_REMIX', clientVersion: '1.20240401.01.00', hl: 'en', gl: 'US' },
+    39→  },
+    40→};
+    41→const USER_AGENT =
+    42→  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+    43→
+    44→const DEFAULT_ACCENT = { accent: '#535353', accentSoft: '#1c1c1c' };
+    45→
+    46→/* ------------------------------ JSON utils ------------------------------ */
+    47→
+    48→type Dict = Record<string, unknown>;
+    49→const isDict = (v: unknown): v is Dict => typeof v === 'object' && v !== null && !Array.isArray(v);
+    50→
+    51→function* walkDicts(o: unknown): Generator<Dict> {
+    52→  if (isDict(o)) {
+    53→    yield o;
+    54→    for (const v of Object.values(o)) yield* walkDicts(v);
+    55→  } else if (Array.isArray(o)) {
+    56→    for (const v of o) yield* walkDicts(v);
+    57→  }
+    58→}
+    59→
+    60→/** Collect every value stored under `key` anywhere in the tree (e.g. all renderers of one kind). */
+    61→function collect<T = Dict>(o: unknown, key: string): T[] {
+    62→  const out: T[] = [];
+    63→  for (const d of walkDicts(o)) {
+    64→    const v = d[key];
+    65→    if (v !== undefined) out.push(v as T);
+    66→  }
+    67→  return out;
+    68→}
+    69→
+    70→function findFirst(o: unknown, pred: (d: Dict) => string | undefined): string | undefined {
+    71→  for (const d of walkDicts(o)) {
+    72→    const r = pred(d);
+    73→    if (r) return r;
+    74→  }
+    75→  return undefined;
+    76→}
+    77→
+    78→function findVideoId(o: unknown): string | undefined {
+    79→  return findFirst(o, (d) => {
+    80→    const we = d.watchEndpoint as Dict | undefined;
+    81→    return typeof we?.videoId === 'string' ? we.videoId : undefined;
+    82→  });
+    83→}
+    84→
+    85→function findBrowseId(o: unknown): string | undefined {
+    86→  return findFirst(o, (d) => {
+    87→    const be = d.browseEndpoint as Dict | undefined;
+    88→    return typeof be?.browseId === 'string' ? be.browseId : undefined;
+    89→  });
+    90→}
+    91→
+    92→function runsText(runs: unknown): string {
+    93→  if (!Array.isArray(runs)) return '';
+    94→  return runs.map((r) => (isDict(r) && typeof r.text === 'string' ? r.text : '')).join('');
+    95→}
+    96→
+    97→function pickThumb(o: unknown): string | undefined {
+    98→  let best: { url: string; area: number } | undefined;
+    99→  for (const d of walkDicts(o)) {
+   100→    const th = d.thumbnails;
+   101→    if (Array.isArray(th)) {
+   102→      for (const t of th) {
+   103→        if (isDict(t) && typeof t.url === 'string' && typeof t.width === 'number' && typeof t.height === 'number') {
+   104→          const area = t.width * t.height;
+   105→          if (!best || area > best.area) best = { url: t.url, area };
+   106→        }
+   107→      }
+   108→    }
+   109→  }
+   110→  return best?.url;
+   111→}
+   112→
+   113→/* ------------------------------- parsing -------------------------------- */
+   114→
+   115→/** "1.8B plays" / "9.1B views" / "31.1M subscribers" → number */
+   116→export function parseCount(text: unknown): number {
+   117→  if (typeof text !== 'string') return 0;
+   118→  const m = /([\d.]+)\s*([KMB])?/i.exec(text.replace(/,/g, ''));
+   119→  if (!m) return 0;
+   120→  const n = parseFloat(m[1]);
+   121→  if (Number.isNaN(n)) return 0;
+   122→  const mult = m[2] ? { K: 1e3, M: 1e6, B: 1e9 }[m[2].toUpperCase()] ?? 1 : 1;
+   123→  return Math.round(n * mult);
+   124→}
+   125→
+   126→/** "3:41" → 221 (seconds) */
+   127→export function parseDurationSec(text: unknown): number {
+   128→  if (typeof text !== 'string') return 0;
+   129→  const parts = text.trim().split(':').map((p) => parseInt(p, 10));
+   130→  if (!parts.length || parts.some((p) => Number.isNaN(p))) return 0;
+   131→  return parts.reduce((acc, p) => acc * 60 + p, 0);
+   132→}
+   133→
+   134→const TIME_RUN_RE = /^\d{1,2}:[0-5]\d(?::[0-5]\d)?$/;
+   135→
+   136→/**
+   137→ * Search/artist rows carry the track duration inside the subtitle runs
+   138→ * (e.g. "Daft Punk • One More Time • 5:21"). Extracts the last m:ss run.
+   139→ */
+   140→function durationFromRuns(runs: unknown[]): number {
+   141→  let last: string | undefined;
+   142→  for (const r of runs) {
+   143→    if (isDict(r) && typeof r.text === 'string' && TIME_RUN_RE.test(r.text.trim())) last = r.text.trim();
+   144→  }
+   145→  return last ? parseDurationSec(last) : 0;
+   146→}
+   147→
+   148→export function slugify(s: string): string {
+   149→  return (
+   150→    s
+   151→      .toLowerCase()
+   152→      .replace(/[^a-z0-9]+/g, '-')
+   153→      .replace(/^-+|-+$/g, '')
+   154→      .slice(0, 60) || 'yt'
+   155→  );
+   156→}
+   157→
+   158→/* ------------------------------- caches --------------------------------- */
+   159→
+   160→const jsonCache = new Map<string, { exp: number; data: unknown }>();
+   161→const imageCache = new Map<string, { buf: Uint8Array; type: string }>();
+   162→const accentCache = new Map<string, { accent: string; accentSoft: string }>();
+   163→/** Metadata for videoIds we have already seen (warmed by every parse). */
+   164→const videoStash = new Map<string, RawItem>();
+   165→
+   166→/* ------------------------------ innertube ------------------------------- */
+   167→
+   168→async function innertube<T = Dict>(endpoint: string, body: Dict, ttlMs = 5 * 60_000): Promise<T> {
+   169→  const cacheKey = `${endpoint}:${JSON.stringify(body)}`;
+   170→  const hit = jsonCache.get(cacheKey);
+   171→  if (hit && hit.exp > Date.now()) return hit.data as T;
+   172→
+   173→  const ctrl = new AbortController();
+   174→  const timer = setTimeout(() => ctrl.abort(), 9000);
+   175→  try {
+   176→    const res = await fetch(`${INNERTUBE_BASE}/${endpoint}?key=${INNERTUBE_KEY}&prettyPrint=false`, {
+   177→      method: 'POST',
+   178→      headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+   179→      body: JSON.stringify({ ...CONTEXT, ...body }),
+   180→      signal: ctrl.signal,
+   181→      cache: 'no-store',
+   182→    });
+   183→    if (!res.ok) throw new Error(`innertube ${endpoint} → HTTP ${res.status}`);
+   184→    const data = (await res.json()) as T;
+   185→    if (jsonCache.size > 200) jsonCache.clear();
+   186→    jsonCache.set(cacheKey, { exp: Date.now() + ttlMs, data });
+   187→    return data;
+   188→  } finally {
+   189→    clearTimeout(timer);
+   190→  }
+   191→}
+   192→
+   193→/* ------------------------------- images --------------------------------- */
+   194→
+   195→const IMG_HOST_ALLOW = [/\.ytimg\.com$/i, /\.googleusercontent\.com$/i, /\.ggpht\.com$/i, /\.youtube\.com$/i];
+   196→
+   197→export function proxiedImage(url: string | undefined): string {
+   198→  if (!url) return '';
+   199→  return `/api/yt/img?u=${encodeURIComponent(url)}`;
+   200→}
+   201→
+   202→export async function ytImage(url: string): Promise<{ buf: Uint8Array; type: string } | null> {
+   203→  const hit = imageCache.get(url);
+   204→  if (hit) return hit;
+   205→  try {
+   206→    const parsed = new URL(url);
+   207→    if (parsed.protocol !== 'https:' || !IMG_HOST_ALLOW.some((re) => re.test(parsed.hostname))) return null;
+   208→    const ctrl = new AbortController();
+   209→    const timer = setTimeout(() => ctrl.abort(), 6000);
+   210→    const res = await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
+   211→    clearTimeout(timer);
+   212→    if (!res.ok) return null;
+   213→    const type = res.headers.get('content-type') ?? 'image/jpeg';
+   214→    if (!type.startsWith('image/')) return null;
+   215→    const buf = new Uint8Array(await res.arrayBuffer());
+   216→    if (buf.byteLength > 3_000_000) return null;
+   217→    if (imageCache.size > 400) imageCache.clear();
+   218→    const entry = { buf, type };
+   219→    imageCache.set(url, entry);
+   220→    return entry;
+   221→  } catch {
+   222→    return null;
+   223→  }
+   224→}
+   225→
+   226→/** Vibrant accent pair from a YouTube thumbnail (Spotify-style hero gradient). */
+   227→export async function ytAccent(url: string | undefined): Promise<{ accent: string; accentSoft: string }> {
+   228→  if (!url) return DEFAULT_ACCENT;
+   229→  const hit = accentCache.get(url);
+   230→  if (hit) return hit;
+   231→  const img = await ytImage(url);
+   232→  let result = DEFAULT_ACCENT;
+   233→  if (img) {
+   234→    try {
+   235→      // Downscale to a 10×10 grid and pick the "vibrant" quadrant:
+   236→      // mean of the brightest 25% of pixels (avoids black bars / dark edges).
+   237→      const { data, info } = await sharp(Buffer.from(img.buf))
+   238→        .removeAlpha()
+   239→        .resize(10, 10, { fit: 'fill' })
+   240→        .raw()
+   241→        .toBuffer({ resolveWithObject: true });
+   242→      const px: number[][] = [];
+   243→      for (let i = 0; i + 2 < data.length; i += info.channels) {
+   244→        px.push([data[i], data[i + 1], data[i + 2]]);
+   245→      }
+   246→      if (px.length) {
+   247→        const lum = (p: number[]) => 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+   248→        const sorted = [...px].sort((a, b) => lum(a) - lum(b));
+   249→        const vibrant = sorted.slice(Math.floor(sorted.length * 0.75));
+   250→        const mean = (arr: number[][]) => arr.reduce<number[]>((acc, p) => acc.map((v, i) => v + p[i]), [0, 0, 0]).map((v) => v / arr.length);
+   251→        let [r, g, b] = mean(vibrant);
+   252→        // keep the accent lively but not neon
+   253→        const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+   254→        if (l < 60) {
+   255→          r = Math.min(255, r * 2.4);
+   256→          g = Math.min(255, g * 2.4);
+   257→          b = Math.min(255, b * 2.4);
+   258→        } else if (l > 180) {
+   259→          r *= 0.72;
+   260→          g *= 0.72;
+   261→          b *= 0.72;
+   262→        }
+   263→        const hex = (n: number) => Math.round(Math.max(0, Math.min(255, n))).toString(16).padStart(2, '0');
+   264→        const soft = (n: number) => Math.round(Math.max(36, Math.min(255, n * 0.4)));
+   265→        result = {
+   266→          accent: `#${hex(r)}${hex(g)}${hex(b)}`,
+   267→          accentSoft: `#${hex(soft(r))}${hex(soft(g))}${hex(soft(b))}`,
+   268→        };
+   269→      }
+   270→    } catch {
+   271→      result = DEFAULT_ACCENT;
+   272→    }
+   273→  }
+   274→  if (accentCache.size > 400) accentCache.clear();
+   275→  accentCache.set(url, result);
+   276→  return result;
+   277→}
+   278→
+   279→/* ----------------------------- raw entities ----------------------------- */
+   280→
+   281→export type RawKind = 'song' | 'video' | 'artist' | 'album' | 'playlist' | 'unknown';
+   282→
+   283→export interface RawItem {
+   284→  kind: RawKind;
+   285→  videoId?: string;
+   286→  browseId?: string;
+   287→  title: string;
+   288→  subtitleRuns: unknown[];
+   289→  playsText?: string;
+   290→  durationText?: string;
+   291→  thumb?: string;
+   292→}
+   293→
+   294→function classify(browseId?: string, videoId?: string): RawKind {
+   295→  if (browseId?.startsWith('UC')) return 'artist';
+   296→  if (browseId?.startsWith('MPREb') || browseId?.startsWith('MPSP')) return 'album';
+   297→  if (browseId?.startsWith('VL') || browseId?.startsWith('PL') || browseId?.startsWith('RD')) return 'playlist';
+   298→  if (browseId) return 'unknown';
+   299→  if (videoId) return 'song';
+   300→  return 'unknown';
+   301→}
+   302→
+   303→/** First subtitle run often carries the entity kind: "Song"/"Album"/"Video"/… */
+   304→const KIND_WORDS: Record<string, RawKind> = {
+   305→  Song: 'song',
+   306→  Video: 'video',
+   307→  Album: 'album',
+   308→  Single: 'album',
+   309→  EP: 'album',
+   310→  Artist: 'artist',
+   311→  Playlist: 'playlist',
+   312→};
+   313→
+   314→/**
+   315→ * Robust list-item classification. Songs can carry a *channel* browseId from
+   316→ * their artist subtitle link, so explicit signals come first:
+   317→ * playlistItemData / watch nav → song; browse nav → by prefix; then deep walks.
+   318→ */
+   319→function classifyListItem(r: Dict, kindWord?: string): RawKind {
+   320→  if (kindWord && KIND_WORDS[kindWord]) return KIND_WORDS[kindWord];
+   321→  const pid = (r.playlistItemData as Dict | undefined)?.videoId;
+   322→  if (typeof pid === 'string') return 'song';
+   323→  const nav = r.navigationEndpoint as Dict | undefined;
+   324→  const navWe = (nav?.watchEndpoint as Dict | undefined)?.videoId;
+   325→  if (typeof navWe === 'string') return 'song';
+   326→  const navBe = (nav?.browseEndpoint as Dict | undefined)?.browseId;
+   327→  if (typeof navBe === 'string') return classify(navBe, undefined);
+   328→  const vid = findVideoId(r);
+   329→  if (vid) return 'song';
+   330→  const be = findBrowseId(r);
+   331→  return classify(be, undefined);
+   332→}
+   333→
+   334→function stashVideo(item: RawItem) {
+   335→  if (item.videoId && item.title) videoStash.set(item.videoId, item);
+   336→}
+   337→
+   338→/** Unwrap + parse a shelf's `contents` (each item is `{musicResponsiveListItemRenderer:{…}}`). */
+   339→function shelfListItems(shelf: Dict): RawItem[] {
+   340→  const contents = Array.isArray(shelf.contents) ? (shelf.contents as unknown[]) : [];
+   341→  const out: RawItem[] = [];
+   342→  for (const c of contents) {
+   343→    if (!isDict(c)) continue;
+   344→    const lr = (c.musicResponsiveListItemRenderer as Dict | undefined) ?? c;
+   345→    const it = fromListItem(lr);
+   346→    if (it) out.push(it);
+   347→  }
+   348→  return out;
+   349→}
+   350→
+   351→/** Collect a page's track items: playlist shelf first, then bare album-style list items. */
+   352→function collectTrackItems(d: Dict): RawItem[] {
+   353→  for (const shelf of collect<Dict>(d, 'musicPlaylistShelfRenderer')) {
+   354→    const items = shelfListItems(shelf).filter((i) => !!i.videoId);
+   355→    if (items.length) return items;
+   356→  }
+   357→  const out: RawItem[] = [];
+   358→  for (const lr of collect<Dict>(d, 'musicResponsiveListItemRenderer')) {
+   359→    const pid = (lr.playlistItemData as Dict | undefined)?.videoId;
+   360→    if (typeof pid !== 'string') continue;
+   361→    const it = fromListItem(lr);
+   362→    if (it?.videoId) out.push(it);
+   363→  }
+   364→  return out;
+   365→}
+   366→
+   367→interface ParsedHeader {
+   368→  title: string;
+   369→  subtitleRuns: unknown[];
+   370→  /** e.g. the artist line on album/playlist pages (with UC navigation). */
+   371→  strapRuns: unknown[];
+   372→  secondSubtitle: string;
+   373→  description: string;
+   374→  listeners?: number;
+   375→  thumb?: string;
+   376→}
+   377→
+   378→/** Unified page header parser (immersive + responsive header flavors). */
+   379→function parseHeader(d: Dict): ParsedHeader {
+   380→  const h =
+   381→    collect<Dict>(d, 'musicResponsiveHeaderRenderer')[0] ??
+   382→    collect<Dict>(d, 'musicImmersiveHeaderRenderer')[0] ??
+   383→    collect<Dict>(d, 'musicHeaderRenderer')[0] ??
+   384→    collect<Dict>(d, 'playlistHeaderRenderer')[0] ??
+   385→    {};
+   386→  const subtitleRuns = Array.isArray((h.subtitle as Dict | undefined)?.runs)
+   387→    ? ((h.subtitle as Dict).runs as unknown[])
+   388→    : [];
+   389→  const strapRuns = Array.isArray((h.straplineTextOne as Dict | undefined)?.runs)
+   390→    ? ((h.straplineTextOne as Dict).runs as unknown[])
+   391→    : [];
+   392→  let description = runsText((h.description as Dict | undefined)?.runs);
+   393→  if (!description) {
+   394→    const nested = (h.description as Dict | undefined)?.musicDescriptionShelfRenderer as Dict | undefined;
+   395→    if (isDict(nested)) description = runsText((nested.description as Dict | undefined)?.runs);
+   396→  }
+   397→  const mlc = h.monthlyListenerCount as Dict | undefined;
+   398→  const listeners = mlc ? parseCount(runsText(mlc.runs)) : undefined;
+   399→  return {
+   400→    title: runsText((h.title as Dict | undefined)?.runs),
+   401→    subtitleRuns,
+   402→    strapRuns,
+   403→    secondSubtitle: runsText((h.secondSubtitle as Dict | undefined)?.runs),
+   404→    description,
+   405→    listeners,
+   406→    thumb: pickThumb(h) ?? pickThumb(d),
+   407→  };
+   408→}
+   409→
+   410→/** musicResponsiveListItemRenderer (search shelves, album/playlist track lists, top songs) */
+   411→function fromListItem(r: Dict): RawItem | null {
+   412→  const flex = Array.isArray(r.flexColumns) ? (r.flexColumns as unknown[]) : [];
+   413→  const colRuns = (i: number): unknown[] => {
+   414→    const c = flex[i] as Dict | undefined;
+   415→    const fc = c?.musicResponsiveListItemFlexColumnRenderer as Dict | undefined;
+   416→    const text = fc?.text as Dict | undefined;
+   417→    return Array.isArray(text?.runs) ? (text.runs as unknown[]) : [];
+   418→  };
+   419→  const title = runsText(colRuns(0));
+   420→  if (!title) return null;
+   421→
+   422→  const fixed = Array.isArray(r.fixedColumns) ? (r.fixedColumns[0] as Dict | undefined) : undefined;
+   423→  const durRuns = ((fixed?.musicResponsiveListItemFixedColumnRenderer as Dict | undefined)?.text as Dict | undefined)?.runs;
+   424→  const durationText = runsText(durRuns) || undefined;
+   425→
+   426→  const pid = (r.playlistItemData as Dict | undefined)?.videoId;
+   427→  const videoId = typeof pid === 'string' ? pid : findVideoId(r);
+   428→  const navBrowse = ((r.navigationEndpoint as Dict | undefined)?.browseEndpoint as Dict | undefined)?.browseId;
+   429→  const browseId = typeof navBrowse === 'string' ? navBrowse : findBrowseId(r);
+   430→
+   431→  const playsText = runsText(colRuns(2)) || undefined;
+   432→  const subRuns1 = colRuns(1);
+   433→  const firstSubRun = subRuns1.length ? subRuns1[0] : undefined;
+   434→  const subKind =
+   435→    isDict(firstSubRun) && typeof firstSubRun.text === 'string' ? firstSubRun.text : undefined;
+   436→  return {
+   437→    kind: classifyListItem(r, subKind),
+   438→    videoId,
+   439→    browseId,
+   440→    title,
+   441→    subtitleRuns: colRuns(1),
+   442→    playsText: /play|view/i.test(playsText ?? '') ? playsText : undefined,
+   443→    durationText,
+   444→    thumb: pickThumb(r),
+   445→  };
+   446→}
+   447→
+   448→/** musicTwoRowItemRenderer (home shelves, artist discography, moods) */
+   449→function fromTwoRow(t: Dict): RawItem | null {
+   450→  const title = runsText((t.title as Dict | undefined)?.runs);
+   451→  if (!title) return null;
+   452→  const nav = (t.navigationEndpoint ?? t.onTap) as Dict | undefined;
+   453→  const be = (nav?.browseEndpoint as Dict | undefined)?.browseId;
+   454→  const we = nav?.watchEndpoint as Dict | undefined;
+   455→  const wpe = nav?.watchPlaylistEndpoint as Dict | undefined;
+   456→  const browseId =
+   457→    typeof be === 'string' ? be : typeof wpe?.playlistId === 'string' ? (wpe.playlistId as string) : findBrowseId(t.title);
+   458→  const videoId = typeof we?.videoId === 'string' ? (we.videoId as string) : undefined;
+   459→  const subRuns = (t.subtitle as Dict | undefined)?.runs;
+   460→  return {
+   461→    kind: classify(browseId, videoId),
+   462→    videoId,
+   463→    browseId,
+   464→    title,
+   465→    subtitleRuns: Array.isArray(subRuns) ? (subRuns as unknown[]) : [],
+   466→    playsText: undefined,
+   467→    durationText: undefined,
+   468→    thumb: pickThumb(t),
+   469→  };
+   470→}
+   471→
+   472→/** musicCardShelfRenderer (search top result) */
+   473→function fromCard(c: Dict): RawItem | null {
+   474→  const title = runsText((c.title as Dict | undefined)?.runs);
+   475→  if (!title) return null;
+   476→  const nav = (c.onTap ?? c.navigationEndpoint) as Dict | undefined;
+   477→  const be = (nav?.browseEndpoint as Dict | undefined)?.browseId;
+   478→  const we = nav?.watchEndpoint as Dict | undefined;
+   479→  const browseId = typeof be === 'string' ? be : findBrowseId(c);
+   480→  const videoId = typeof we?.videoId === 'string' ? (we.videoId as string) : findVideoId(c);
+   481→  const subRuns = (c.subtitle as Dict | undefined)?.runs;
+   482→  // "Song • Artist" / "Video • Artist" cards are tracks even when the card
+   483→  // also carries an artist browse id (e.g. auto-generated meme "artists").
+   484→  const subText = runsText(subRuns);
+   485→  const kindWord = (subText.split('•')[0] ?? '').trim().toLowerCase();
+   486→  const kind: RawKind =
+   487→    (kindWord === 'song' || kindWord === 'video') && videoId ? 'song' : classify(browseId, videoId);
+   488→  return {
+   489→    kind,
+   490→    videoId,
+   491→    browseId,
+   492→    title,
+   493→    subtitleRuns: Array.isArray(subRuns) ? (subRuns as unknown[]) : [],
+   494→    playsText: undefined,
+   495→    durationText: undefined,
+   496→    thumb: pickThumb(c),
+   497→  };
+   498→}
+   499→
+   500→/* ------------------------------ DTO mappers ----------------------------- */
+   501→
+   502→/**
+   503→ * Display-safe owner/creator name. The upstream catalog is never leaked into
+   504→ * the UI — editorial playlists map to our own brand, everything else keeps its
+   505→ * real creator name.
+   506→ */
+   507→function displayOwner(raw: string): string {
+   508→  const cleaned = raw.replace(/•/g, '').trim();
+   509→  if (!cleaned || /youtube|google/i.test(cleaned)) return 'Spotify';
+   510→  return cleaned;
+   511→}
+   512→
+   513→/** Last segment of a "Kind • Creator" subtitle line, display-safe. */
+   514→function subtitleOwner(runs: unknown[]): string {
+   515→  const parts = runsText(runs).split('•');
+   516→  return displayOwner(parts[parts.length - 1] ?? '');
+   517→}
+   518→
+   519→function artistRefFrom(runs: unknown[]): { id: string; slug: string; name: string } {
+   520→  for (const r of runs) {
+   521→    if (isDict(r)) {
+   522→      const be = ((r.navigationEndpoint as Dict | undefined)?.browseEndpoint as Dict | undefined)?.browseId;
+   523→      if (typeof be === 'string' && be.startsWith('UC')) {
+   524→        return { id: `yt:${be}`, slug: `yt-${be}`, name: typeof r.text === 'string' ? r.text : 'Unknown artist' };
+   525→      }
+   526→    }
+   527→  }
+   528→  const joined = runsText(runs);
+   529→  const name = joined.split('•')[0]?.trim() || 'Unknown artist';
+   530→  const s = slugify(name);
+   531→  return { id: `yt:ar:${s}`, slug: `yt-ar-${s}`, name };
+   532→}
+   533→
+   534→/** Artist link from a page strapline (e.g. album header's artist line). */
+   535→function headerStrapArtist(strapRuns: unknown[]): { id: string; slug: string; name: string } | null {
+   536→  for (const r of strapRuns) {
+   537→    if (isDict(r)) {
+   538→      const be = ((r.navigationEndpoint as Dict | undefined)?.browseEndpoint as Dict | undefined)?.browseId;
+   539→      if (typeof be === 'string' && be.startsWith('UC')) {
+   540→        return { id: `yt:${be}`, slug: `yt-${be}`, name: typeof r.text === 'string' ? r.text : 'Artist' };
+   541→      }
+   542→    }
+   543→  }
+   544→  return null;
+   545→}
+   546→
+   547→interface AlbumRefInput {
+   548→  id: string;
+   549→  slug: string;
+   550→  title: string;
+   551→  cover: string;
+   552→  accent: string;
+   553→  accentSoft: string;
+   554→  year: number;
+   555→}
+   556→
+   557→export async function ytTrackDTO(
+   558→  item: RawItem,
+   559→  opts: { album?: AlbumRefInput; number?: number; durationOverride?: number } = {}
+   560→): Promise<TrackDTO | null> {
+   561→  const videoId = item.videoId;
+   562→  if (!videoId) return null;
+   563→  stashVideo(item);
+   564→  const accent = await ytAccent(item.thumb);
+   565→  const album: AlbumRefInput =
+   566→    opts.album ?? {
+   567→      id: `yt:al:single:${videoId}`,
+   568→      slug: `yt-single-${videoId}`,
+   569→      title: item.title,
+   570→      cover: proxiedImage(item.thumb),
+   571→      year: new Date().getFullYear(),
+   572→      ...accent,
+   573→    };
+   574→  return {
+   575→    id: `yt:${videoId}`,
+   576→    slug: `yt-${videoId}`,
+   577→    title: item.title,
+   578→    // Tier-2 relay (only used when the video forbids embedding)
+   579→    file: `/api/yt/stream/${videoId}`,
+   580→    duration:
+   581→      parseDurationSec(item.durationText) || durationFromRuns(item.subtitleRuns) || opts.durationOverride || 0,
+   582→    number: opts.number ?? 1,
+   583→    plays: parseCount(item.playsText),
+   584→    liked: false,
+   585→    album: {
+   586→      id: album.id,
+   587→      slug: album.slug,
+   588→      title: album.title,
+   589→      cover: album.cover || proxiedImage(item.thumb),
+   590→      accent: album.accent,
+   591→      accentSoft: album.accentSoft,
+   592→      year: album.year,
+   593→    },
+   594→    artist: artistRefFrom(item.subtitleRuns),
+   595→    source: 'youtube',
+   596→  };
+   597→}
+   598→
+   599→export async function ytAlbumDTO(item: RawItem): Promise<AlbumDTO | null> {
+   600→  if (!item.browseId) return null;
+   601→  const accent = await ytAccent(item.thumb);
+   602→  const sub = runsText(item.subtitleRuns);
+   603→  const yearMatch = /(19|20)\d{2}/.exec(sub);
+   604→  const type = /single/i.test(sub) ? 'single' : /\bEP\b/i.test(sub) ? 'ep' : 'album';
+   605→  return {
+   606→    id: `yt:${item.browseId}`,
+   607→    slug: `yt-${item.browseId}`,
+   608→    title: item.title,
+   609→    cover: proxiedImage(item.thumb),
+   610→    accent: accent.accent,
+   611→    accentSoft: accent.accentSoft,
+   612→    year: yearMatch ? parseInt(yearMatch[0], 10) : new Date().getFullYear(),
+   613→    type,
+   614→    genre: '',
+   615→    description: '',
+   616→    artist: artistRefFrom(item.subtitleRuns),
+   617→    trackCount: 0,
+   618→    totalDuration: 0,
+   619→    plays: parseCount(item.playsText),
+   620→    source: 'youtube',
+   621→  };
+   622→}
+   623→
+   624→export function ytArtistDTO(item: RawItem): ArtistDTO | null {
+   625→  if (!item.browseId?.startsWith('UC')) return null;
+   626→  const sub = runsText(item.subtitleRuns);
+   627→  return {
+   628→    id: `yt:${item.browseId}`,
+   629→    slug: `yt-${item.browseId}`,
+   630→    name: item.title,
+   631→    image: proxiedImage(item.thumb),
+   632→    bio: '',
+   633→    monthlyListeners: parseCount(sub),
+   634→    source: 'youtube',
+   635→  };
+   636→}
+   637→
+   638→export function ytPlaylistDTO(item: RawItem): PlaylistDTO | null {
+   639→  if (!item.browseId) return null;
+   640→  stashVideo(item);
+   641→  return {
+   642→    id: `yt:${item.browseId}`,
+   643→    slug: `yt-${item.browseId}`,
+   644→    name: item.title,
+   645→    description: null,
+   646→    cover: proxiedImage(item.thumb) || null,
+   647→    coverFrom: null,
+   648→    coverTo: null,
+   649→    icon: null,
+   650→    owner: subtitleOwner(item.subtitleRuns),
+   651→    editable: false,
+   652→    trackCount: 0,
+   653→    totalDuration: 0,
+   654→    source: 'youtube',
+   655→  };
+   656→}
+   657→
+   658→/** Pseudo-playlist for a bare song/video card (single track). */
+   659→export function ytSinglePlaylistDTO(item: RawItem): PlaylistDTO | null {
+   660→  if (!item.videoId) return null;
+   661→  stashVideo(item);
+   662→  return {
+   663→    id: `yt:single:${item.videoId}`,
+   664→    slug: `yt-single-${item.videoId}`,
+   665→    name: item.title,
+   666→    description: null,
+   667→    cover: proxiedImage(item.thumb) || null,
+   668→    coverFrom: null,
+   669→    coverTo: null,
+   670→    icon: null,
+   671→    owner: subtitleOwner(item.subtitleRuns),
+   672→    editable: false,
+   673→    trackCount: 1,
+   674→    totalDuration: 0,
+   675→    source: 'youtube',
+   676→  };
+   677→}
+   678→
+   679→async function mapShelfItem(item: RawItem): Promise<ShelfItem | null> {
+   680→  switch (item.kind) {
+   681→    case 'album':
+   682→      return ytAlbumDTO(item);
+   683→    case 'artist':
+   684→      return ytArtistDTO(item);
+   685→    case 'playlist':
+   686→      return ytPlaylistDTO(item);
+   687→    case 'song':
+   688→    case 'video':
+   689→      return ytSinglePlaylistDTO(item);
+   690→    default:
+   691→      return null;
+   692→  }
+   693→}
+   694→
+   695→/* ------------------------------- fetchers ------------------------------- */
+   696→
+   697→/** Resolve metadata for a bare videoId via the `next` endpoint (used for pseudo entities). */
+   698→export async function nextVideoMeta(videoId: string): Promise<RawItem> {
+   699→  try {
+   700→    const d = await innertube('next', { videoId, isAudioOnly: true });
+   701→    const panel = collect<Dict>(d, 'playlistPanelVideoRenderer')[0];
+   702→    if (isDict(panel)) {
+   703→      const title = runsText((panel.title as Dict | undefined)?.runs) || 'Track';
+   704→      const byline =
+   705→        (panel.longBylineText as Dict | undefined)?.runs ?? (panel.shortBylineText as Dict | undefined)?.runs ?? [];
+   706→      const playsText = Array.isArray(byline)
+   707→        ? byline.map((r) => (isDict(r) ? String(r.text ?? '') : '')).find((t) => /views?|plays/i.test(t))
+   708→        : undefined;
+   709→      const lengthText = runsText((panel.lengthText as Dict | undefined)?.runs);
+   710→      return {
+   711→        kind: 'song',
+   712→        videoId,
+   713→        title,
+   714→        subtitleRuns: Array.isArray(byline) ? (byline as unknown[]) : [],
+   715→        playsText,
+   716→        durationText: lengthText || undefined,
+   717→        thumb: pickThumb(panel),
+   718→      };
+   719→    }
+   720→  } catch {
+   721→    /* fall through to minimal */
+   722→  }
+   723→  return { kind: 'song', videoId, title: 'Track', subtitleRuns: [], thumb: undefined };
+   724→}
+   725→
+   726→async function mapTopResult(item: RawItem): Promise<SearchDTO['topResult']> {
+   727→  switch (item.kind) {
+   728→    case 'song':
+   729→    case 'video': {
+   730→      const t = await ytTrackDTO(item);
+   731→      return t ? { ...t, type: 'track' } : null;
+   732→    }
+   733→    case 'artist': {
+   734→      const a = ytArtistDTO(item);
+   735→      return a ? { ...a, type: 'artist' } : null;
+   736→    }
+   737→    case 'album': {
+   738→      const a = await ytAlbumDTO(item);
+   739→      return a ? { ...a, type: 'album' } : null;
+   740→    }
+   741→    case 'playlist': {
+   742→      const p = ytPlaylistDTO(item);
+   743→      return p ? { ...p, type: 'playlist' } : null;
+   744→    }
+   745→    default:
+   746→      return null;
+   747→  }
+   748→}
+   749→
+   750→const SEARCH_SONGS_FILTER = 'EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D';
+   751→
+   752→/** Podcast/episode uploads that surface as "videos" — not music. */
+   753→function isEpisodeItem(item: RawItem): boolean {
+   754→  const first = (runsText(item.subtitleRuns).split('•')[0] ?? '').trim().toLowerCase();
+   755→  if (first === 'episode' || first === 'podcast') return true;
+   756→  return /\bep(isode)?\s*\d+\b/i.test(item.title);
+   757→}
+   758→
+   759→/** Live YouTube Music search, mapped into our SearchDTO shape. */
+   760→export async function ytSearch(query: string): Promise<SearchDTO> {
+   761→  // Songs-filtered search in parallel: song rows there carry real durations
+   762→  // ("Daft Punk • One More Time • 5:21") which the mixed search omits.
+   763→  const songsFilterPromise = innertube('search', { query, params: SEARCH_SONGS_FILTER })
+   764→    .then((d) => d as Dict | null)
+   765→    .catch(() => null);
+   766→  const d = await innertube('search', { query });
+   767→
+   768→  let topResult: SearchDTO['topResult'] = null;
+   769→  const card = collect<Dict>(d, 'musicCardShelfRenderer')[0];
+   770→  if (isDict(card)) {
+   771→    const item = fromCard(card);
+   772→    if (item) topResult = await mapTopResult(item);
+   773→  }
+   774→
+   775→  /* Collect items from BOTH layouts:
+   776→     - shelf layout (filtered searches): musicShelfRenderer with titled buckets
+   777→     - flat layout (mixed search): one itemSectionRenderer per result        */
+   778→  const raw: { item: RawItem; shelfTitle: string }[] = [];
+   779→  for (const shelf of collect<Dict>(d, 'musicShelfRenderer')) {
+   780→    const shelfTitle = runsText((shelf.title as Dict | undefined)?.runs).toLowerCase();
+   781→    for (const it of shelfListItems(shelf)) raw.push({ item: it, shelfTitle });
+   782→  }
+   783→  for (const isr of collect<Dict>(d, 'itemSectionRenderer')) {
+   784→    const contents = Array.isArray(isr.contents) ? (isr.contents as unknown[]) : [];
+   785→    for (const c of contents) {
+   786→      const lr = isDict(c) ? (c.musicResponsiveListItemRenderer as Dict | undefined) : undefined;
+   787→      if (isDict(lr)) {
+   788→        const it = fromListItem(lr);
+   789→        if (it) raw.push({ item: it, shelfTitle: '' });
+   790→      }
+   791→    }
+   792→  }
+   793→
+   794→  const songs: RawItem[] = [];
+   795→  const videos: RawItem[] = [];
+   796→  const artists: RawItem[] = [];
+   797→  const albums: RawItem[] = [];
+   798→  const playlists: RawItem[] = [];
+   799→  for (const { item, shelfTitle } of raw) {
+   800→    const asVideo = shelfTitle.includes('video') && (item.kind === 'song' || item.kind === 'video');
+   801→    switch (item.kind) {
+   802→      case 'song':
+   803→        if (asVideo) videos.push(item);
+   804→        else songs.push(item);
+   805→        break;
+   806→      case 'video':
+   807→        videos.push(item);
+   808→        break;
+   809→      case 'artist':
+   810→        artists.push(item);
+   811→        break;
+   812→      case 'album':
+   813→        albums.push(item);
+   814→        break;
+   815→      case 'playlist':
+   816→        /* Channel-backed "playlists" (UC ids) have no browsable track list. */
+   817→        if (/^(VL|PL|RD)/.test(item.browseId ?? '')) playlists.push(item);
+   818→        break;
+   819→      default:
+   820→        break;
+   821→    }
+   822→  }
+   823→
+   824→  // Songs first (canonical topic uploads), then video uploads — user/VEVO
+   825→  // uploads of the same tracks often behave differently for embedding, so
+   826→  // keeping both improves playback odds and alternate resolution. Podcast
+   827→  // episodes are dropped.
+   828→  const musicVideos = videos.filter((v) => !isEpisodeItem(v));
+   829→  const trackItems = [...songs.slice(0, 9), ...musicVideos.slice(0, 6)];
+   830→  const durationMap = new Map<string, number>();
+   831→  const songsFilter = await songsFilterPromise;
+   832→  if (songsFilter) {
+   833→    for (const shelf of collect<Dict>(songsFilter, 'musicShelfRenderer')) {
+   834→      for (const it of shelfListItems(shelf)) {
+   835→        if (!it.videoId) continue;
+   836→        const dur = parseDurationSec(it.durationText) || durationFromRuns(it.subtitleRuns);
+   837→        if (dur > 0) durationMap.set(it.videoId, dur);
+   838→      }
+   839→    }
+   840→  }
+   841→  const tracks = (
+   842→    await Promise.all(
+   843→      trackItems.map((i) => ytTrackDTO(i, { durationOverride: i.videoId ? durationMap.get(i.videoId) : undefined }))
+   844→    )
+   845→  ).filter((t): t is TrackDTO => t !== null);
+   846→  const albumDtos = (await Promise.all(albums.slice(0, 8).map(ytAlbumDTO))).filter((a): a is AlbumDTO => a !== null);
+   847→  const artistDtos = artists
+   848→    .slice(0, 8)
+   849→    .map(ytArtistDTO)
+   850→    .filter((a): a is ArtistDTO => a !== null);
+   851→  const playlistDtos = playlists
+   852→    .slice(0, 8)
+   853→    .map(ytPlaylistDTO)
+   854→    .filter((p): p is PlaylistDTO => p !== null);
+   855→
+   856→  if (!topResult && tracks.length) topResult = { ...tracks[0], type: 'track' };
+   857→  if (!topResult && artistDtos.length) topResult = { ...artistDtos[0], type: 'artist' };
+   858→  if (!topResult && playlistDtos.length) topResult = { ...playlistDtos[0], type: 'playlist' };
+   859→  if (!topResult && albumDtos.length) topResult = { ...albumDtos[0], type: 'album' };
+   860→
+   861→  return { query, topResult, tracks, albums: albumDtos, artists: artistDtos, playlists: playlistDtos };
+   862→}
+   863→
+   864→/** Live YouTube Music home shelves (new releases, trending…). */
+   865→export async function ytHome(): Promise<ShelfDTO[]> {
+   866→  const d = await innertube('browse', { browseId: 'FEmusic_home' }, 15 * 60_000);
+   867→  const shelves: ShelfDTO[] = [];
+   868→  for (const c of collect<Dict>(d, 'musicCarouselShelfRenderer')) {
+   869→    const title = runsText(
+   870→      (((c.header as Dict | undefined)?.musicCarouselShelfBasicHeaderRenderer as Dict | undefined)?.title as Dict | undefined)?.runs
+   871→    );
+   872→    if (!title) continue;
+   873→    const contents = Array.isArray(c.contents) ? (c.contents as unknown[]) : [];
+   874→    const rawItems: RawItem[] = [];
+   875→    for (const content of contents) {
+   876→      if (!isDict(content)) continue;
+   877→      const twoRow = content.musicTwoRowItemRenderer as Dict | undefined;
+   878→      if (isDict(twoRow)) {
+   879→        const it = fromTwoRow(twoRow);
+   880→        if (it) rawItems.push(it);
+   881→        continue;
+   882→      }
+   883→      const listItem = content.musicResponsiveListItemRenderer as Dict | undefined;
+   884→      if (isDict(listItem)) {
+   885→        const it = fromListItem(listItem);
+   886→        if (it) rawItems.push(it);
+   887→      }
+   888→    }
+   889→    if (!rawItems.length) continue;
+   890→    const items = (
+   891→      await Promise.all(rawItems.slice(0, 12).map(mapShelfItem))
+   892→    ).filter((i): i is ShelfItem => i !== null);
+   893→    // YouTube home shelves occasionally repeat the same entity — dedupe by id
+   894→    const seen = new Set<string>();
+   895→    const unique = items.filter((i) => (seen.has(i.id) ? false : (seen.add(i.id), true)));
+   896→    if (unique.length) shelves.push({ id: `yt-home-${slugify(title)}`, title, items: unique });
+   897→  }
+   898→  return shelves;
+   899→}
+   900→
+   901→/** Live artist page: top songs, discography, about. */
+   902→export async function ytArtist(slug: string): Promise<ArtistDetailDTO | null> {
+   903→  const browseId = slug.replace(/^yt[-:]/, '');
+   904→  if (!browseId.startsWith('UC')) {
+   905→    const name = decodeURIComponent(slug.replace(/^yt-ar-/, '').replace(/^yt[-:]/, ''));
+   906→    return ytArtistByName(name);
+   907→  }
+   908→  const d = await innertube('browse', { browseId }, 15 * 60_000);
+   909→  const header = parseHeader(d);
+   910→  const name = header.title || 'Artist';
+   911→  const strapline = runsText(header.subtitleRuns);
+   912→
+   913→  // About / bio (header description or About shelf)
+   914→  let bio = header.description;
+   915→  if (!bio) {
+   916→    const descShelf = collect<Dict>(d, 'musicDescriptionShelfRenderer')[0];
+   917→    bio = runsText((descShelf?.description as Dict | undefined)?.runs);
+   918→  }
+   919→  if (bio.length > 900) bio = `${bio.slice(0, 900)}…`;
+   920→
+   921→  // Top songs: first shelf whose items carry videoIds
+   922→  const topTracks: TrackDTO[] = [];
+   923→  for (const shelf of collect<Dict>(d, 'musicShelfRenderer')) {
+   924→    const items = shelfListItems(shelf).filter((i) => !!i.videoId);
+   925→    if (items.length >= 3) {
+   926→      const mapped = (
+   927→        await Promise.all(items.slice(0, 10).map((i, idx) => ytTrackDTO(i, { number: idx + 1 })))
+   928→      ).filter((t): t is TrackDTO => t !== null);
+   929→      topTracks.push(...mapped);
+   930→      break;
+   931→    }
+   932→  }
+   933→
+   934→  // Discography: carousel shelves with album entities
+   935→  const albumItems: RawItem[] = [];
+   936→  for (const c of collect<Dict>(d, 'musicCarouselShelfRenderer')) {
+   937→    const contents = Array.isArray(c.contents) ? (c.contents as unknown[]) : [];
+   938→    for (const content of contents) {
+   939→      const twoRow = isDict(content) ? (content.musicTwoRowItemRenderer as Dict | undefined) : undefined;
+   940→      if (isDict(twoRow)) {
+   941→        const it = fromTwoRow(twoRow);
+   942→        if (it && it.kind === 'album') albumItems.push(it);
+   943→      }
+   944→    }
+   945→  }
+   946→  const albums = (
+   947→    await Promise.all(albumItems.slice(0, 12).map(ytAlbumDTO))
+   948→  ).filter((a): a is AlbumDTO => a !== null);
+   949→
+   950→  return {
+   951→    id: `yt:${browseId}`,
+   952→    slug: `yt-${browseId}`,
+   953→    name,
+   954→    image: proxiedImage(header.thumb),
+   955→    bio: bio || 'Artist',
+   956→    monthlyListeners: header.listeners ?? parseCount(strapline),
+   957→    topTracks,
+   958→    albums,
+   959→    source: 'youtube',
+   960→  };
+   961→}
+   962→
+   963→async function ytArtistByName(name: string): Promise<ArtistDetailDTO | null> {
+   964→  try {
+   965→    const d = await innertube('search', { query: name, params: 'EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D' });
+   966→    for (const shelf of collect<Dict>(d, 'musicShelfRenderer')) {
+   967→      const contents = Array.isArray(shelf.contents) ? (shelf.contents as unknown[]) : [];
+   968→      for (const c of contents) {
+   969→        if (!isDict(c)) continue;
+   970→        const it = fromListItem(c as Dict);
+   971→        if (it?.browseId?.startsWith('UC')) return ytArtist(`yt-${it.browseId}`);
+   972→      }
+   973→    }
+   974→  } catch {
+   975→    return null;
+   976→  }
+   977→  return null;
+   978→}
+   979→
+   980→/** Live album page with its real track list. */
+   981→export async function ytAlbum(slug: string): Promise<AlbumDetailDTO | null> {
+   982→  const browseId = slug.replace(/^yt[-:]/, '');
+   983→  if (browseId.startsWith('single-')) return ytSingleAlbum(browseId.replace('single-', ''));
+   984→  if (!browseId.startsWith('MPREb') && !browseId.startsWith('MPSP')) return null;
+   985→  const d = await innertube('browse', { browseId }, 15 * 60_000);
+   986→  const header = parseHeader(d);
+   987→  const title = header.title || 'Album';
+   988→  const sub = runsText(header.subtitleRuns);
+   989→  const yearMatch = /(19|20)\d{2}/.exec(sub);
+   990→  const type = /single/i.test(sub) ? 'single' : /\bEP\b/i.test(sub) ? 'ep' : 'album';
+   991→  const accent = await ytAccent(header.thumb);
+   992→
+   993→  const albumRef: AlbumRefInput = {
+   994→    id: `yt:${browseId}`,
+   995→    slug: `yt-${browseId}`,
+   996→    title,
+   997→    cover: proxiedImage(header.thumb),
+   998→    accent: accent.accent,
+   999→    accentSoft: accent.accentSoft,
+  1000→    year: yearMatch ? parseInt(yearMatch[0], 10) : new Date().getFullYear(),
+  1001→  };
+  1002→
+  1003→  const items = collectTrackItems(d);
+  1004→  const tracks = (
+  1005→    await Promise.all(items.map((i, idx) => ytTrackDTO(i, { album: albumRef, number: idx + 1 })))
+  1006→  ).filter((t): t is TrackDTO => t !== null);
+  1007→
+  1008→  // Artist: strapline link first, then first track's artist, then subtitle text
+  1009→  const artist =
+  1010→    headerStrapArtist(header.strapRuns) ?? tracks[0]?.artist ?? artistRefFrom(header.subtitleRuns);
+  1011→  return {
+  1012→    id: albumRef.id,
+  1013→    slug: albumRef.slug,
+  1014→    title,
+  1015→    cover: albumRef.cover,
+  1016→    accent: albumRef.accent,
+  1017→    accentSoft: albumRef.accentSoft,
+  1018→    year: albumRef.year,
+  1019→    type,
+  1020→    genre: '',
+  1021→    description: header.description,
+  1022→    artist,
+  1023→    trackCount: tracks.length,
+  1024→    totalDuration: tracks.reduce((s, t) => s + t.duration, 0),
+  1025→    plays: tracks.reduce((s, t) => s + t.plays, 0),
+  1026→    tracks,
+  1027→    source: 'youtube',
+  1028→  };
+  1029→}
+  1030→
+  1031→/** Single-track "album" for synth singles (go-to-album on a YT song). */
+  1032→export async function ytSingleAlbum(videoId: string): Promise<AlbumDetailDTO | null> {
+  1033→  const item = videoStash.get(videoId) ?? (await nextVideoMeta(videoId));
+  1034→  const track = await ytTrackDTO(item);
+  1035→  if (!track) return null;
+  1036→  return {
+  1037→    id: track.album.id,
+  1038→    slug: track.album.slug,
+  1039→    title: track.title,
+  1040→    cover: track.album.cover,
+  1041→    accent: track.album.accent,
+  1042→    accentSoft: track.album.accentSoft,
+  1043→    year: track.album.year,
+  1044→    type: 'single',
+  1045→    genre: '',
+  1046→    description: 'Single',
+  1047→    artist: track.artist,
+  1048→    trackCount: 1,
+  1049→    totalDuration: track.duration,
+  1050→    plays: track.plays,
+  1051→    tracks: [track],
+  1052→    source: 'youtube',
+  1053→  };
+  1054→}
+  1055→
+  1056→/** Live playlist page (VL/PL/RD ids). */
+  1057→export async function ytPlaylist(slug: string): Promise<PlaylistDetailDTO | null> {
+  1058→  const browseId = slug.replace(/^yt[-:]/, '');
+  1059→  if (browseId.startsWith('single-')) return ytSingle(browseId.replace('single-', ''));
+  1060→  const d = await innertube('browse', { browseId }, 15 * 60_000);
+  1061→  const header = parseHeader(d);
+  1062→  const name = header.title || 'Playlist';
+  1063→  const accent = await ytAccent(header.thumb);
+  1064→
+  1065→  const items = collectTrackItems(d).slice(0, 50);
+  1066→  const tracks = (
+  1067→    await Promise.all(items.map((i, idx) => ytTrackDTO(i, { number: idx + 1 })))
+  1068→  ).filter((t): t is TrackDTO => t !== null);
+  1069→
+  1070→  const owner = displayOwner(runsText(header.strapRuns));
+  1071→  return {
+  1072→    id: `yt:${browseId}`,
+  1073→    slug: `yt-${browseId}`,
+  1074→    name,
+  1075→    description: header.description || null,
+  1076→    cover: proxiedImage(header.thumb) || tracks[0]?.album.cover || null,
+  1077→    coverFrom: accent.accentSoft,
+  1078→    coverTo: null,
+  1079→    icon: null,
+  1080→    owner,
+  1081→    editable: false,
+  1082→    trackCount: tracks.length,
+  1083→    totalDuration: tracks.reduce((s, t) => s + t.duration, 0),
+  1084→    tracks,
+  1085→    source: 'youtube',
+  1086→  };
+  1087→}
+  1088→
+  1089→/** Pseudo-playlist containing a single song (home "song" cards). */
+  1090→export async function ytSingle(videoId: string): Promise<PlaylistDetailDTO | null> {
+  1091→  const item = videoStash.get(videoId) ?? (await nextVideoMeta(videoId));
+  1092→  const track = await ytTrackDTO(item);
+  1093→  if (!track) return null;
+  1094→  return {
+  1095→    id: `yt:single:${videoId}`,
+  1096→    slug: `yt-single-${videoId}`,
+  1097→    name: item.title,
+  1098→    description: null,
+  1099→    cover: track.album.cover,
+  1100→    coverFrom: track.album.accentSoft,
+  1101→    coverTo: null,
+  1102→    icon: null,
+  1103→    owner: track.artist.name || 'Spotify',
+  1104→    editable: false,
+  1105→    trackCount: 1,
+  1106→    totalDuration: track.duration,
+  1107→    tracks: [track],
+  1108→    source: 'youtube',
+  1109→  };
+  1110→}
+  1111→
+  1112→/** Current cache stats (diagnostics). */
+  1113→export function ytStats() {
+  1114→  return {
+  1115→    json: jsonCache.size,
+  1116→    images: imageCache.size,
+  1117→    accents: accentCache.size,
+  1118→    stash: videoStash.size,
+  1119→  };
+  1120→}
+  1121→

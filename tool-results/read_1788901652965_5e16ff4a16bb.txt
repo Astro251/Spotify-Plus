@@ -1,0 +1,202 @@
+   260→Verification (agent-browser @ 390×844 and 1280×800):
+   261→- REAL YouTube audio streams end-to-end: clicked "Never Gonna Give You Up" (topic upload lYBUbBu4W08, embed-blocked 150) → resolution chain fired → alternate dQw4w9WgXcQ reached STATE playing → progress hairline 6.8%→16.3%→23.6%, real duration 3:33 reported, now-playing fullscreen shows 1:02/3:33 elapsed/total
+   262→- Player controls verified on YT engine: pause (state frozen, hairline frozen), resume, drag-seek on the custom slider (aria-valuenow 83→179, elapsed 3:07), queue auto-advance on ended (state 0 → next(true) → blocked next track resolves itself)
+   263→- Engine handoff verified both ways: local playlist (Daily Mix 1 → "Neon Skyline") plays via <audio> WHILE ytEngine state = paused; switching back to a YT track reloads the embed
+   264→- Desktop (1280×800): sidebar + desktop player bar (seek 444px, volume 96px sliders) + YT row click → playing
+   265→- /api/yt/stream/{blocked-video} → 503 in 1.7s (fast-fail as designed); POST /api/tracks/yt:dQw4w9WgXcQ/play → 200
+   266→- bun run lint: PASS; bunx tsc --noEmit: src/ clean; fresh-load console: zero errors
+   267→- Known sandbox-only limitation: this datacenter IP gets error 150 on most label uploads (embed gating is IP-reputation-augmented). Real user browsers are far less gated (music embeds play on normal networks); the resolution chain covers the rest. Removed public/yt-embed-test.html QA page
+   268→
+   269→Stage Summary:
+   270→- Audio now genuinely streams from YouTube: primary = official IFrame embed (YouTube-served audio), secondary = alternate-upload resolution (YouTube Music data), tertiary = server relay through open-source tooling (yt-dlp + bgutil POT provider + Invidious, currently IP-blocked but auto-recovering). The fake local-audio mapping is gone. Local demo library still plays through <audio>.
+   271→- All playback UX is engine-agnostic: seek/progress/volume/shuffle/repeat/queue/MediaSession work identically for local and YouTube tracks.
+   272→- Key services: Next.js dev server (port 3000) + bgutil POT provider mini-service (port 4416, `cd mini-services/bgutil-provider/server && bun run dev`).
+   273→- Next-phase candidates: pre-resolve embeddable videoIds at search time (batch probe via a hidden YT player) to skip 150 latency entirely; queue/radio autoplay from related tracks (getWatchPlaylist); duration backfill for artist top tracks via the `next` endpoint; show "alternate upload" indicator chip on rows; playlist cover mosaics for YT tracks.
+   274→
+   275→---
+   276→Task ID: 11
+   277→Agent: main (Z.ai Code)
+   278→Task: Remove all dummy local data (procedurally generated demo catalog) + remove every YouTube Music mention from the frontend; continue development
+   279→
+   280→User request: "we are fetching data from youtube so we dont need the dummy data anymore. Also it is not necessary to mention in the frontend that the data is from youtube music."
+   281→
+   282→Work Log:
+   283→- DB CLEANUP: new scripts/remove-dummy-data.ts — wiped 12 demo playlists (93 links), 38 demo tracks, 12 albums, 12 artists; kept 2 liked YouTube shadow rows. Also fixed stale file paths on old shadow rows (/audio/*.mp3 → /api/yt/stream/{vid}). Remaining: 4 liked tracks, 1 user playlist (Road Trip, created during QA), their shadow albums/artists.
+   284→- ASSETS REMOVED: public/audio (38 MP3s), public/covers, public/artists, scripts/{gen-audio,extract-accents,seed}.ts, scripts/{audio-meta,accents}.json. src has zero references to them (verified by grep).
+   285→- /api/home REWRITTEN: pure live feed — ytHome() shelves + quickPicks = first 7 unique shelf items (playlists/albums/artists/songs) + "Made by you" shelf prepended when user playlists exist + likedCount. 502 on failure.
+   286→- /api/library: playlists + liked only (no albums/artists). LibraryDTO slimmed accordingly.
+   287→- /api/search: local search branch deleted — always live ytSearch + mergeLikedStates.
+   288→- DE-BRANDED all user-visible strings: ytmusic.ts displayOwner()/subtitleOwner() helpers (owner "YouTube Music"/"Google"→"Spotify", real creator names otherwise), artist fallbacks→'Unknown artist'/'Artist', track fallback→'Track', single description→'Single'; yt-shadow.ts bio→'Artist', description→'Single'; player-engine toasts reworded ("This track is unavailable." etc.).
+   289→- FRONTEND: home-view rewritten (QuickTile handles playlist/album/artist discrimination via `in` checks, error card with Try again + refetch, skeletons); search-view source toggle REMOVED (always live), "Browse all" heading, reworded error card with Try again; library-view rewritten (Liked + playlists only, filter chips removed, Spotify-style "Create your first playlist" empty state, mobile create button kept); album-view "More by" always from live artist discography (useLibrary removed); track-row/queue-sheet/now-playing: YtBadge + YouTube pill removed; yt-badge.tsx + /api/yt/home route + useYtHome hook deleted; ui store libraryFilter removed.
+   290→- PLAYBACK ROBUSTNESS FIX (found during QA): tryEmbed previously abandoned embed-ACCEPTED videos that sat at "cued" (autoplay held back after 9s timeout) and marked them blocked forever. Now: 'cued' state → nudge ytEngine.play(); on chain success → ytEngine.play() + armAutoplayWatchdog(track).
+   291→- SEARCH QUALITY FIX: podcast/episode uploads (e.g. "Smashing Security 73", artist field "Episode") no longer pollute song results — isEpisodeItem() filter (first subtitle segment 'episode'/'podcast' or "Episode N" title pattern) applied to the videos slice.
+   292→- queries.ts: useSearch(query) (no source param), useYtHome removed, useHomeFeed staleTime 5min + retry 1.
+   293→
+   294→Verification (agent-browser @ 390×844 + 1280×800):
+   295→- Home: live quick picks (7 tiles + Liked) + "Today's fresh & popular"/"New releases" shelves with real covers/creators; zero YouTube branding; error→retry path coded.
+   296→- Search: "Browse all" genres; "never gonna give you up" → real results, podcast entries GONE (before: 3 podcast rows; after: only music).
+   297→- REAL AUDIO STREAMING: native click on Rick Astley row → primary lYBUbBu4W08 blocked(150) → chain resolved alternate dQw4w9WgXcQ → state:playing, real duration 213.061s, progress 0:08→0:23→2:28 advancing; PAUSE (engine state:paused, frozen) + RESUME verified; queue auto-advance on 'ended' worked autonomously (advanced through blocked tracks to an embeddable remaster via alternate).
+   298→- Like flow: heart on playing track → /api/liked grew 2→4 with correct entries. Create playlist "Road Trip" + kebab→Add to playlist → "Added to Road Trip" toast, API confirms 1 song, "Made by you" shelf on home.
+   299→- Library: Liked Songs (4 songs) + Road Trip rows; playlists+liked empty state CTA coded.
+   300→- Desktop: sidebar (Liked + Road Trip), full player bar, "Made by you" + live shelves.
+   301→- VLM review of 3 screenshots: "very polished and authentic Spotify aesthetic", no broken images, NO YouTube/YouTube Music text visible anywhere.
+   302→- bunx tsc --noEmit (src): clean. bun run lint: clean. Fresh-load console: zero errors. Mobile 390px: no horizontal overflow. dev.log: all routes 200.
+   303→- NOTE for future QA: agent-browser eval-based .click() is UNTRUSTED (no user activation → unmuted autoplay stays blocked at 'cued'); use native `agent-browser click @ref` from snapshots for playback tests. Synthetic clicks on hidden desktop player-bar buttons also mis-route — snapshot refs are authoritative.
+   304→
+   305→Stage Summary:
+   306→- The dummy demo catalog is fully gone: every piece of content (shelves, quick picks, search, artists, albums, playlists) is live YouTube Music data; the DB only holds user artifacts (liked shadow rows, user playlists + their shadow tracks).
+   307→- The frontend is fully de-branded — no YouTube Music mentions, badges, source toggles, or attribution anywhere; editorial playlist owners map to "Spotify".
+   308→- Playback chain hardened (cued-accept fix) and search de-polluted (podcast filter).
+   309→- App state after QA: 4 liked songs, 1 user playlist "Road Trip" (1 track). 
+   310→- Known sandbox-only limitation (unchanged): datacenter IP gets error 150 on most label uploads; the alternate-upload chain covers it (verified live: dQw4w9WgXcQ streamed). Real user networks are far less gated.
+   311→- Next-phase candidates: pre-resolve embeddable videoIds at search time; lyrics view; artist radio (getWatchPlaylist autoplay); duration backfill for artist top tracks; queue drag-to-reorder; share buttons on shelves; recently-played quick picks from play history.
+   312→
+   313→---
+   314→Task ID: 12
+   315→Agent: main (Z.ai Code)
+   316→Task: Song Radio + endless Autoplay + Recently Played ("Jump back in") + Sleep Timer; QA round via agent-browser; two real playback-engine bug fixes; styling polish
+   317→
+   318→User request: "good. now lets continue the development of our spotify clone." (+ scheduled review round: assess status, QA first, then continue with features/styling)
+   319→
+   320→Work Log:
+   321→- NEW ytRadio(videoId, {exclude, limit}) in ytmusic.ts: the `next` InnerTube endpoint with playlistId `RDAMVM{videoId}` (isAudioOnly, params wAEB) — YouTube Music's autoplay mix, parsed from playlistPanelVideoRenderer (title/shortByline/lengthText/thumbnail/watchEndpoint.videoId) into TrackDTOs. Probe-verified live: 50 real related tracks w/ durations from seed dQw4w9WgXcQ.
+   322→- NEW /api/yt/radio?videoId=&exclude= route (force-dynamic, mergeLikedStates overlay). Verified HTTP 200 + 50 tracks.
+   323→- PRISMA: Track.lastPlayedAt DateTime? + @@index, pushed. POST /api/tracks/[id]/play now accepts body {track: TrackDTO}: ensureShadowTrack() (creates artist/album/track shadow rows) + plays increment + lastPlayedAt — EVERY played track now persists to history (not just liked ones). ensureShadowTrack update clause fixed to not zero out learned durations (only overwrite when DTO duration > 0).
+   324→- /api/home: recentTracks[] = last 20 by lastPlayedAt, deduped by (title|artist), top 8, serialized via trackDTO. HomeFeedDTO.recentTracks. Verified: recently played tracks (incl. the live preview user's listening!) appear.
+   325→- PLAYER STORE: autoplay (persisted, default on) + toggleAutoplay; radioPending {seedId, nonce} set by next(auto=true) at queue end when autoplay && seed.source==='youtube'; extendQueue(tracks) appends after current order; setSleepTimer(minutes|'end'|null) + sleepTimer state {mode, endsAt, trackId}.
+   326→- PLAYER ENGINE: handleRadioPending — fetches /api/yt/radio with exclude=all queue ids, extendQueue + next(true), stops cleanly on failure/supersede; in-flight guard. Sleep timer: 1s poll for minutes-mode (pause + toast), end-of-track mode pauses on tracked-track finish (drive(cur,false) → next track loads cued, no autoplay blip). Play POST now sends the full track DTO (duration backfilled from learned store state).
+   327→- UI: track-row kebab "Start radio" (Radio icon); now-playing "..." is now a real menu: Start radio / Go to artist / Go to album / Copy song link / Sleep timer submenu (Off w/ countdown, End of track, 5/10/15/30/45/60 min) + moon badge chip in the bottom bar (tap = off, replaces Lyrics button while active); queue sheet: "Autoplay" section with Switch (Spotify-style); home "Jump back in" shelf (MediaCard tiles, click → playTracks([t]) → radio continues); artist-view kebab "Start radio" (seeds with top track); now-playing context label "FROM RADIO"; ∞-icon "Radio" pill in BOTH mini (mobile) and desktop player bars when context is radio.
+   328→- BUG FIX 1 (cascade): the YT error handler re-entered handleEmbedBlocked for EVERY 150 — including alternates loaded mid-chain — creating an unbounded alternate-probe cascade that never advanced the queue. Fix: only the track's PRIMARY videoId triggers the chain; mid-chain/alternate blocks are consumed by the chain itself.
+   329→- BUG FIX 2 (dead guard): Chrome fires the audio element's 'play' event optimistically when play() is called (even for a relay request that then 503s) — onAudioPlay reset the fail streak EVERY track, so the 4-consecutive-failure guard could never accumulate. Fix: listen to 'playing' (actual playback) instead of 'play'. Also failTrack now drops events silently when isPlaying is already false (no churn after sleep-timer/guard pause).
+   330→- INFRA: dev server OOM-killed by the kernel (2GB RSS on 4GB sandbox, dmesg proved it) + my tool-call-spawned restarts died at call boundaries (harness sweeps the shell's process tree; setsid alone is NOT enough — PPID is unchanged). WORKING RESTART PATTERN: `bash -c 'setsid env NODE_OPTIONS=--max-old-space-size=1280 bun run dev > dev.log 2>&1 < /dev/null &'` — the intermediate bash exits immediately, bun reparents to init (PPID 1) and survives. Also imageCache cap 400→150. Server verified stable across calls (1.2GB RSS steady).
+   331→- STYLING POLISH: toasts restyled Spotify-authentic dark (#282828, white text, subtle border+shadow) instead of all-green; radio pill; moon badge; queue autoplay section.
+   332→
+   333→Verification (agent-browser, 390×844 mobile + 1280×800 desktop):
+   334→- API: /api/yt/radio 200 (50 tracks); /api/home 200 with recentTracks; POST play with DTO 200 (shadow rows + plays increment).
+   335→- AUTOPLAY E2E: recent tile click (single-track queue) → keyboard-seek to track end → 'ended' → radioPending → radio fetched → queue extended (verified "Next up (23→49)" in queue sheet) → auto-advance through the mix.
+   336→- FAIL GUARD (post-fix): streak instrumentation proved streak:1-every-track before the fix; after — streak 1,2,3,4 → guard trips → isPlaying false, churn stops cleanly. Sandbox caveat: most radio tracks are label uploads blocked from THIS datacenter IP; on real user networks primaries play directly (embeddable tracks verified: dQw4w9WgXcQ playing, real duration 213.061s, progress advancing, pause/resume/seek).
+   337→- START RADIO (3 entry points): search-row kebab, now-playing menu (toast "Radio started", header "FROM RADIO", queue 49 up next, ∞ Radio pill in mini + desktop bars), artist kebab.
+   338→- SLEEP TIMER: end-of-track → track ended → paused cleanly (moon consumed, Lyrics restored, no churn); 5-min → moon badge "5 min" + toast; tap moon → "Sleep timer off".
+   339→- Autoplay switch toggles off/on in queue sheet (both states verified).
+   340→- Screenshots in download/: qa-mobile-home/-playing/-nowplaying/-np-menu/-sleep-menu/-sleep-badge/-queue/-queue-radio/-radio-started, qa-desktop-home/-queue/-player/-toast.
+   341→- bunx tsc --noEmit src clean; bun run lint PASS; dev.log all 200s; console: only expected [yt-engine] error-150 warnings.
+   342→
+   343→Stage Summary:
+   344→- Endless playback is live: any song can seed a radio (YouTube Music autoplay mix), the queue auto-extends when it runs dry (Spotify-style Autoplay, toggleable in Queue), recently played feeds "Jump back in" on Home, and a sleep timer (minutes or end-of-track) rounds out the listening experience.
+   345→- Two REAL engine bugs fixed found by QA: the resolver re-entry cascade and the optimistic-'play' streak reset (the consecutive-failure guard was effectively dead whenever the relay tier was exercised).
+   346→- Infra learned: the sandbox OOM-kills next dev at ~2GB RSS (heap now capped 1280MB) and background processes must double-fork (reparent to init) to survive tool-call boundaries — the bgutil provider already does this pattern implicitly.
+   347→- Known sandbox-only limitation (unchanged): datacenter IP gets error 150 on most label uploads; alternate chain + guard handle it; real user networks play primaries directly.
+   348→- Next-phase candidates: lyrics view (LRCLIB open API, synced highlighting — the "Lyrics" button currently toasts "coming soon"); pre-resolve embeddable videoIds at search time (hidden player batch probe); queue drag-to-reorder; share deep-links (?t=track-slug restores+plays); duration backfill for shadow rows on replay; "hi" test playlist in DB (user-created, harmless).
+   349→
+   350→---
+   351→Task ID: 13
+   352→Agent: main (Z.ai Code)
+   353→Task: Scheduled review round: QA first (agent-browser), then new features — Synced Lyrics (LRCLIB), queue drag-to-reorder, keyboard shortcuts, recent searches + styling polish; one real bug fixed
+   354→
+   355→User request: (cron scheduled) Assess project status, QA via agent-browser, fix bugs, then independently pick the most valuable work focus and continue development with more features + styling detail.
+   356→
+   357→Work Log:
+   358→- BUG FIXED (found in QA): duplicate React keys in home shelves — YouTube Music home can return two shelves with the SAME title ("Take it easy" ×2) → identical ids `yt-home-take-it-easy` → console key errors. Fix: ytHome() now dedupes shelves by slugified title (shelfSlugs set). Verified: /api/home returns unique shelf ids; fresh-load console = 0 errors.
+   359→- KNOWN-BENIGN: one-time hydration warning (Radix useId aria-controls prefix mismatch on the sidebar "Create playlist" dialog trigger) appears on SOME loads — dev-mode streaming-SSR id-tree divergence, zero functional impact (dialog opens fine). Not fixed (React id generation internals, low ROI).
+   360→- NEW FEATURE 1 — Synced Lyrics (flagship): 
+   361→  - Prisma `Lyrics` model (trackId unique, synced, instrumental, lines JSON, fetchedAt) + db:push
+   362→  - /api/lyrics route: DB cache (positive forever, negative 24h) → LRCLIB /api/get exact (title/artist/duration) → /api/search fallback (prefers synced, then closest duration) → LRC parser (multi-timestamp lines, fractional secs) → plainLyrics fallback → instrumental handling → 404 when absent. 6s timeouts, upsert best-effort.
+   363→  - useLyrics(track) hook (staleTime Infinity, gcTime 30min, retry 0)
+   364→  - ui store: lyricsOpen + setters
+   365→  - NEW src/components/spotify/lyrics-panel.tsx — Spotify-style karaoke: 1.65rem/5xl extrabold lines, active = white + scale-102 + glow text-shadow, passed = /45, future = /35; auto-follow centers the active line (skipped for 3.5s after user scroll, programmatic-scroll filtered by 300ms guard); tap-line-to-seek (synced only); loading skeleton lines + "Finding lyrics…" chip; instrumental + no-lyrics empty states; py-[28vh] scroll framing.
+   366→  - NowPlaying: lyrics mode replaces the artwork zone (controls/seek stay below); Lyrics pill button now toggles (aria-pressed, active = white bg); close() resets lyricsOpen; ambient radial-gradient backdrop added behind the artwork (blur-64 saturate-150).
+   367→- NEW FEATURE 2 — Queue drag-to-reorder: player store reorderUpNext(newTail) (head up-to-current preserved, missing tail entries re-appended as safety); QueueSheet rewritten with framer-motion Reorder.Group + per-row UpNextRow (useDragControls + GripVertical handle, dragListener=false so taps/scrolls stay natural, whileDrag lift+shadow, row click plays, X removes, stopPropagation on remove pointerdown).
+   368→- NEW FEATURE 3 — Keyboard shortcuts (Spotify-style): use-player-hotkeys.ts mounted in AppShell — Space/K play-pause, ←/→ seek ±5s, ↑/↓ volume ±10%, J/L prev/next, M mute. isTypingTarget guards inputs/textareas/selects/sliders/menus/dialogs.
+   369→- NEW FEATURE 4 — Recent searches: lib/recent-searches.ts (localStorage, max 8, useSyncExternalStore store shape w/ server-empty snapshot → zero hydration gap); search-view "Recent searches" chip section (tap = re-search, X = remove, Clear all); queries ≥2 chars committed on the existing 250ms debounce.
+   370→- PARITY/POLISH: now-playing "..." menu gained "Add to playlist" submenu (same shape as track-row, incl. New playlist dialog); "Copy song link" (dead /track/slug URL) → "Share song" via Web Share API with clipboard fallback; track-row share likewise; queue sheet header subtitle ("N songs next · autoplay continues after"); desktop home greeting header (h1, client-only via useSyncExternalStore — top bar already greets on mobile); de-duped lucide imports.
+   371→- INFRA: dev server + bgutil provider were restarted (double-fork setsid pattern) — REQUIRED because the dev server's in-memory Prisma client predated the Lyrics schema push (cache upserts silently no-op'd with old client). After restart: lyrics cache verified persisting (40-line Ve Maahi row written + read back). Provider back on 4416, app on 3000, heap cap 1280MB.
+   372→
+   373→Verification (agent-browser @ 390×844 and 1280×800):
+   374→- Lyrics E2E: /api/lyrics 200 with real synced lyrics (Blinding Lights 30+ timestamped lines; Ve Maahi 40 Punjabi lines; cache hit 2nd call); now-playing → Lyrics → 41-line karaoke on desktop; seek slider driven to 2:53 → active line "जिया नहीं जाता, सुन बावरे" correctly highlighted + auto-follow scrolled; tap-line-to-seek verified (elapsed 0:35 → 0:00); mobile lyrics screenshot with live playback (progress 0:07 → 0:19 advancing).
+   375→- Queue: drag @handle → row 1 moved to position 3 (order verified via snapshot); row click → track switched; remove → row count 5→4; drag handles render on desktop + mobile.
+   376→- Hotkeys: M muted→unmuted (persisted prefs flip), ArrowUp ×3 volume 0.8→1.0 + auto-unmute, L advanced track (NGGYU → Midnight Arena upload), Space paused a genuinely-playing track (transient no-op only while the engine auto-pauses blocked embeds — sandbox artifact).
+   377→- Recent searches: typed "weeknd" → cleared → chip renders with remove + Clear all; chip click refills the query; remove kills the section.
+   378→- Regression: fresh mobile + desktop loads = 0 console errors; bun run lint PASS; bunx tsc --noEmit src clean; /api/home 200 (unique shelf ids); dev.log all 200s (503s only from the IP-blocked stream relay tier, as designed).
+   379→- Screenshots: download/qa3-mobile-lyrics{,2}.png, qa3-desktop-lyrics{,-active,-final}.png, qa3-queue-reorder{,ed}.png, qa3-recent-searches.png, qa3-mobile-lyrics-live.png, qa3-final-mobile-home.png, qa3-desktop-home.png, qa3-desktop-queue.png.
+   380→
+   381→Stage Summary:
+   382→- The "Lyrics" button is now real: full karaoke view with synced highlighting, follow-scroll, and tap-to-seek, backed by LRCLIB with a DB cache (positive-forever / negative-24h).
+   383→- Queue is fully manipulable: drag-to-reorder joins click-to-play, remove, clear, and the autoplay toggle.
+   384→- Power-user layer: Spotify keyboard shortcuts; recent searches on the search page.
+   385→- Servers: Next dev (3000, heap-capped) + bgutil POT provider (4416) both running detached (setsid double-fork). RESTART BOTH after any future prisma schema push — the dev server caches its Prisma client.
+   386→- DB state: lyrics cache table live; 5 liked tracks, playlists "Road Trip" + "hi", ~28 embed-blocked videoIds in localStorage (sandbox IP gating tightened further today — even dQw4w9WgXcQ intermittently gated; alternate chain + fail-guard continue to absorb it).
+   387→- Next-phase candidates: pre-resolve embeddable videoIds at search time (hidden player batch probe); queue context menus (remove-per-context); lyrics "expanded fullscreen" variant (full-bleed, no controls); share deep-links (?t= / ?play=); playlist cover mosaics; "Add to playlist" from mini player long-press.
+   388→
+   389→---
+   390→Task ID: 14
+   391→Agent: main (Z.ai Code)
+   392→Task: Scheduled review round: QA first, then playlist cover mosaics + queue row context menus
+   393→
+   394→User request: (cron scheduled) Assess status, QA via agent-browser, fix bugs, independently pick the work focus, keep adding features + styling detail.
+   395→
+   396→Work Log:
+   397→- QA FIRST: app + provider healthy; fresh mobile load 0 console errors; search ("blinding lights" → Top result + Songs) OK; playback loads track + queue churns through sandbox-gated embeds as designed (0 errors during churn); lyrics/queue/hotkeys features from Task 13 all still working. No bugs found → feature round.
+   398→- FEATURE 1 — Playlist cover mosaics (Spotify-authentic):
+   399→  - types: PlaylistDTO.mosaic?: string[] | null
+   400→  - serialize.ts: mosaicCovers() collects the first 4 DISTINCT track album covers (position order); playlistDTO emits mosaic when the playlist has no custom cover image — the creation-time gradient stays as the empty-playlist fallback (matches Spotify: mosaic wins once tracks exist)
+   401→  - Prisma query selects extended: /api/playlists (×2), /api/home, /api/library now select track.album.cover alongside duration; PlaylistFull structural type accepts optional album
+   402→  - Cover component: new mosaic mode — CSS 2×2 grid (grid-cols-2 grid-rows-2), next/image per tile, empty cells dark #242424, role=img + aria-label; priority: src > mosaic > gradient+icon
+   403→  - Wired through every playlist-cover call site: sidebar, home QuickTile + "Made by you" MediaCard (PlaylistCard→MediaCard mosaic prop), library rows + tiles (LibEntry.cover.mosaic), playlist-view hero (+ HeroGradient fallback color), search TopResultCard
+   404→  - DATA FIX during QA: "hi" playlist was empty; POSTed 3 liked-track DTOs into it (2nd POST round with full DTOs updated the shadow rows' album covers via ensureShadowTrack)
+   405→- FEATURE 2 — Queue row context menus:
+   406→  - player store: playNextInQueue(queueIndex) — removes the index from the order and reinserts right after the current track (pos preserved via re-lookup)
+   407→  - QueueSheet UpNextRow: kebab (MoreHorizontal) with Radix DropdownMenu — Play next (toast "Playing next"), Add to playlist submenu (incl. New playlist dialog), Start radio (non-local), Remove from queue (red). Kebab click/pointerdown stopPropagation so drag/play never fire; menu content stopPropagation too
+   408→- EMPTY-STATE AUDIT: all covered already — liked ("Songs you like will appear here" + Find songs CTA), playlist ("Let's find something for your playlist" + Search for songs CTA), library ("Create your first playlist" CTA), queue ("Queue is empty"), search no-results, home error card. No changes needed.
+   409→
+   410→Verification (agent-browser @ 390×844 and 1280×800):
+   411→- Mosaic: /api/playlists + /api/home serve mosaic (3 tiles for "hi"); DOM shows 2×2 grids with 3 images + dark 4th cell on mobile home, library, playlist hero, and desktop sidebar; playlist-view hero renders the mosaic with a softened HeroGradient. Screenshots: download/qa4-mosaic-{home,library,playlist-hero}.png.
+   412→- Queue menus: 47-row radio-extended queue, kebab per row; native click opens menu (Play next / Add to playlist / Start radio / Remove from queue); "Play next" moved the LAST row to FIRST up-next; kebab-remove dropped 47→46 rows. (NOTE: Radix menus do NOT respond to synthetic el.click() — use agent-browser click @ref.)
+   413→- Regression: bun run lint PASS; bunx tsc --noEmit src clean; fresh mobile + desktop loads 0 console errors; dev.log 200s. One flake: after browser close/reopen the first load can render blank (~dev-server lazy compile) — resolves on reload within 10s.
+   414→- Final screenshots: qa4-desktop-final.png, qa4-mosaic-*.png.
+   415→
+   416→Stage Summary:
+   417→- User playlists now get real Spotify-style artwork: a 2×2 mosaic built from their track covers, everywhere playlists appear (sidebar, home, library, detail hero, search top result).
+   418→- Queue rows are fully actionable: play-next, add-to-playlist, start radio, remove — completing queue-management parity with Spotify.
+   419→- DB state: "hi" playlist now has 3 tracks (QA artifacts), 4 liked tracks, lyrics cache table live.
+   420→- Servers: Next dev (3000) + bgutil provider (4416) healthy. (No schema push this round — no restart needed.)
+   421→- Next-phase candidates: share deep-links (?play= with shadow-track lookup + GET /api/tracks/[id]); pre-resolve embeddable videoIds at search time; lyrics fullscreen variant; playlist reordering in library; custom playlist cover upload (URL-based); artist "About" section with image header.
+   422→
+   423→---
+   424→Task ID: 15
+   425→Agent: main (Z.ai Code)
+   426→Task: Scheduled review round: QA first (agent-browser), then Share deep-links + artist plays/duration backfill + marquee/equalizer styling polish
+   427→
+   428→User request: (cron scheduled) Assess project status, QA via agent-browser, fix bugs, independently pick the work focus, keep adding features + styling detail.
+   429→
+   430→Work Log:
+   431→- QA FIRST: server + bgutil provider healthy; fresh mobile + desktop loads = 0 console errors, no horizontal overflow; search/artist/library/lyrics/queue all intact; playback chain + 4-strike fail-guard behaving as designed under sandbox IP gating (embed error 150s → alternate chain → guard stop, cleanly).
+   432→- DATA GAP FIXED (found in QA): artist "Popular" rows showed "–:–" (InnerTube artist shelf carries plays, not durations). Now: TrackRow right column shows formatCount(plays) when duration=0 (Spotify artist-page style) + formatCount learned billions ("4B"); /api/artists/[id] backfills learned durations from shadow rows (any previously-played top track now shows its real m:ss).
+   433→- NEW FEATURE — Share deep-links (the share flow is now real):
+   434→  - GET /api/tracks/[id]: DB row (local + shadow) first; yt: ids resolve live via InnerTube `next` (returns the seed track itself: title/byline/duration/thumb); duration-0 rows get live backfilled; 404 path verified.
+   435→  - nextVideoMeta() now returns null on failure (was a minimal "Track" item) — ytSingleAlbum/ytSingle callers null-check.
+   436→  - src/lib/share.ts: trackShareUrl (?play=<id>) + shareTrack (Web Share API → clipboard fallback, AbortError-safe).
+   437→  - SharedLinkHandler mounted in AppShell: on mount parses ?play=, strips the URL via history.replaceState (refresh never replays), fetches the resolver, playTracks([track], context "Shared with you"), toasts success/error.
+   438→  - TrackRow + NowPlaying "Share song" now share the deep-link (was text-only copy).
+   439→- STYLING POLISH:
+   440→  - Marquee ui-bit: long titles ping-pong scroll with edge fades (mask-image), duration scales with length (5–18s), hover pauses; wired into NowPlaying title + desktop player-bar title. globals.css: new keyframes (0/8% → 45/55% → 92/100% translateX(var(--marquee-shift))), .marquee-fade mask.
+   441→  - Sidebar + Library now show animated green EqualizerBars + spotify-green name on the PLAYING playlist/liked row (authentic Spotify affordance), incl. context-id matching for both slug and id forms.
+   442→  - NowPlaying backdrop opacity bug fixed (VLM QA caught it): gradient middle stop was rgba(18,18,18,.92) → home content ghosted through the overlay; now solid #121212.
+   443→- INFRA: Turbopack served a STALE CSS chunk after the globals.css edit (chunk hash unchanged, mtime old; even a dev-server restart reused .next/dev cache). FIX: rm -rf .next + double-fork setsid restart → CSS recompiled correctly. Remember this when CSS edits don't show up.
+   444→
+   445→Verification (agent-browser @ 390×844 and 1280×800):
+   446→- Deep-link E2E: /?play=yt:dQw4w9WgXcQ → URL cleaned → track resolved → REAL AUDIO STREAMING (state:playing, duration 213.061s, pause/resume via native clicks). Long-title deep-link 89pS1RfOKKA → blocked → alternate chain → queue-end radio kicked in → autoplay advanced into the mix (endless autoplay from a shared link works).
+   447→- Artist plays: The Weeknd Popular now renders "3:36"/"3:22" (learned) and "4B"/"1.5B"/"624M" (plays) — zero "–:–" left.
+   448→- Share menu: track-row kebab → Share song → clipboard write + toast "Link copied to clipboard — Anyone who opens it hears the song."; invalid id → API 404 + error toast.
+   449→- Marquee: NowPlaying title animates (computed transform advanced mid-scroll, animName marquee-scroll, shift −229px measured live); desktop bar marquee verified (shift −309px); short titles stay plain.
+   450→- Sidebar equalizer: playing Liked Songs → 4 eq-bar nodes + rgb(30,215,96) name in the sidebar; library mobile rows + desktop tiles carry the same indicator logic.
+   451→- Regression: bun run lint PASS; bunx tsc --noEmit src clean; fresh loads 0 console errors; no horizontal overflow either viewport; dev.log all 200s (503s only from the by-design IP-gated stream relay tier).
+   452→- Screenshots: download/qa5-{mobile-home,deeplink-play,artist-plays,marquee-nowplaying,sidebar-equalizer,nowplaying-fixed,desktop-marquee,final-mobile-home,final-desktop-home,mini-player}.png.
+   453→
+   454→Stage Summary:
+   455→- Sharing is real end-to-end: any song row / now-playing menu produces a working ?play= link that restores + plays the exact track (live-resolved for never-seen videos, DB-backed otherwise) and then continues into radio autoplay.
+   456→- Artist pages now match Spotify's Popular layout: real play counts everywhere, and true durations wherever the engine has ever played the track (shadow-row learning).
+   457→- Micro-polish pass: ping-pong marquee for long titles (NowPlaying + desktop bar), animated equalizer playing-indicators in sidebar + library, billion-aware count formatting, and the now-playing overlay is now fully opaque (no ghost bleed).
+   458→- Known sandbox-only limitation (unchanged): datacenter IP gates most label-upload embeds with error 150; the alternate chain + fail-guard absorb it and real networks play primaries directly (dQw4w9WgXcQ streamed with real progress during this QA).
+   459→- INFRA NOTE: if a CSS change doesn't appear, rm -rf .next and restart the dev server (double-fork setsid pattern) — Turbopack's persistent chunk cache can serve stale CSS even across restarts.
+
+[showing lines 260-459 of 461; use offset=460 with limit to continue reading]

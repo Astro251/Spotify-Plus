@@ -1,0 +1,312 @@
+     1→     1→# Project Worklog — Spotify Clone (Mobile-First)
+     2→     2→
+     3→     3→## Project Overview
+     4→     4→Building a responsive, mobile-first Spotify clone as a Next.js 16 App Router SPA.
+     5→     5→- Only route: `/` (src/app/page.tsx) — client-side view switching via Zustand navigation store
+     6→     6→- Backend: Next.js API routes + Prisma (SQLite at db/custom.db)
+     7→     7→- Real audio playback: procedurally generated music (Bun script) encoded to MP3 via ffmpeg
+     8→     8→- Assets: AI-generated album covers + artist photos, gradient playlist covers
+     9→     9→- Player: queue, shuffle, repeat (off/all/one), seek, volume, MediaSession, now-playing fullscreen
+    10→    10→- Stack: Tailwind 4, shadcn/ui, lucide-react, zustand, @tanstack/react-query, framer-motion, sonner
+    11→    11→
+    12→    12→## Design tokens (Spotify-like, dark)
+    13→    13→- bg base #0a0a0a, main #121212, elevated #181818, hover #1f1f1f/#242424
+    14→    14→- text white / #b3b3b3 (subdued); brand green #1ed760 (dark #1db954)
+    15→    15→- Custom theme colors via @theme: --color-spotify, --color-subdued, etc. (see globals.css)
+    16→    16→- NO indigo/blue primary. Liked Songs section uses Spotify's purple gradient (brand exception).
+    17→    17→
+    18→    18→## Planned task IDs
+    19→    19→- 0: explore/init (done)
+    20→    20→- 1-a: AI images (12 album covers + 12 artist portraits)
+    21→    21→- 1-b: music engine → 38 MP3 tracks
+    22→    22→- 2: Prisma schema + seed
+    23→    23→- 3: API routes
+    24→    24→- 4: frontend foundation (shell/stores/player)
+    25→    25→- 5: views (subagent)
+    26→    26→- 6: lint/integration
+    27→    27→- 7: agent-browser QA
+    28→    28→- 8: cron job + final report
+    29→    29→
+    30→    30→---
+    31→    31→Task ID: 0
+    32→    32→Agent: main (Z.ai Code)
+    33→    33→Task: Explore project, init worklog, start dev server
+    34→    34→
+    35→    35→Work Log:
+    36→    36→- Explored project: fresh Next.js 16 scaffold, full shadcn/ui set, prisma, zustand, react-query, framer-motion, sonner installed
+    37→    37→- ffmpeg available at /usr/bin/ffmpeg; bun 1.3.14; node v24
+    38→    38→- DATABASE_URL=file:/home/z/my-project/db/custom.db (existing empty db)
+    39→    39→- Started dev server in background (bun run dev, port 3000, logs → dev.log)
+    40→    40→
+    41→    41→Stage Summary:
+    42→    42→- Project understood; dev server running; plan set. Proceeding to asset generation.
+    43→    43→
+    44→    44→---
+    45→    45→Task ID: 1-a
+    46→    46→Agent: main (Z.ai Code)
+    47→    47→Task: Generate album covers + artist portraits via image-generation skill
+    48→    48→
+    49→    49→Work Log:
+    50→    50→- Invoked image-generation skill, used `z-ai image` CLI
+    51→    51→- Generated 12 album covers (public/covers/*.png, 1024x1024)
+    52→    52→- Generated 12 artist portraits (public/artists/*.png)
+    53→    53→- Parallel batch generation (some tool timeouts but all 24 files verified present)
+    54→    54→
+    55→    55→Stage Summary:
+    56→    56→- 24 AI images ready: /covers/{neon-skyline,paper-lanterns,cassette-cafe,first-light,golden-hour,concrete-garden,pulse-theory,wood-wire,after-hours,velvet-rain,piano-two,amber-streets}.png and /artists/{aurora-vex,luna-may,mellow-brick,elias-grove,wilde-hearts,nova-static,pulse-theory,marlow-fields,dj-kismet,echo-harbor,ilse-maren,rey-sol}.png
+    57→    57→
+    58→    58→---
+    59→    59→Task ID: 1-b
+    60→    60→Agent: main (Z.ai Code)
+    61→    61→Task: Procedural music generation (38 tracks)
+    62→    62→
+    63→    63→Work Log:
+    64→    64→- Wrote scripts/gen-audio.ts: full synth engine (pads, plucks, keys, bass, kick/snare/hat/shaker, vinyl noise, feedback delay, softclip master) with 10 styles (synthwave/lofi/ambient/folk/piano/edm/rnb/rock/chill/dream)
+    65→    65→- Rendered 38 tracks, encoded to MP3 via ffmpeg (22MB total in public/audio)
+    66→    66→- Wrote scripts/extract-accents.ts (sharp): dominant accent colors per cover → scripts/accents.json (strong/soft hex per album for gradient headers)
+    67→    67→
+    68→    68→Stage Summary:
+    69→    69→- Real playable audio for all tracks; meta in scripts/audio-meta.json (durations probed via ffprobe)
+    70→    70→- Accent colors power Spotify-style gradient headers
+    71→    71→
+    72→    72→---
+    73→    73→Task ID: 2
+    74→    74→Agent: main (Z.ai Code)
+    75→    75→Task: Prisma schema + seed
+    76→    76→
+    77→    77→Work Log:
+    78→    78→- New prisma/schema.prisma: Artist, Album, Track (liked/plays/likedAt), Playlist (gradient cover fields + icon + editable), PlaylistTrack (position)
+    79→    79→- scripts/seed.ts: 12 artists, 12 albums, 38 tracks, 12 playlists (93 playlist-track entries), 10 liked tracks, deterministic plays
+    80→    80→- Ran bun run db:push + seed successfully
+    81→    81→
+    82→    82→Stage Summary:
+    83→    83→- SQLite db at db/custom.db fully seeded
+    84→    84→
+    85→    85→---
+    86→    86→Task ID: 3
+    87→    87→Agent: main (Z.ai Code)
+    88→    88→Task: API routes
+    89→    89→
+    90→    90→Work Log:
+    91→    91→- src/lib/types.ts (DTOs), src/lib/serialize.ts (mappers)
+    92→    92→- Routes: GET /api/home (quickPicks + 6 shelves), /api/library, /api/search?q=, /api/liked, /api/playlists (GET/POST create), /api/playlists/[id] (GET/PATCH/DELETE, by id or slug), /api/playlists/[id]/tracks (POST add/DELETE remove), /api/albums/[id], /api/artists/[id], /api/tracks/[id]/like (toggle), /api/tracks/[id]/play (increment)
+    93→    93→- Removed prisma query logging from src/lib/db.ts
+    94→    94→- Smoke-tested via curl: home, search, playlist detail, like toggle all OK
+    95→    95→
+    96→    96→Stage Summary:
+    97→    97→- Complete REST backend for the SPA. Next: frontend foundation (stores/player/shell), then views via subagent.
+    98→    98→
+    99→    99→---
+   100→   100→Task ID: 4
+   101→   101→Agent: main (Z.ai Code)
+   102→   102→Task: Frontend foundation (design system, stores, audio engine, app shell, player)
+   103→   103→
+   104→   104→Work Log:
+   105→   105→- globals.css: Spotify dark tokens (@theme: --color-spotify #1ed760, base/elevated/highlight/subdued), custom scrollbars, equalizer keyframes, safe-area utilities
+   106→   106→- layout.tsx: Spotify metadata/viewport, dark html class; page.tsx renders Providers+AppShell
+   107→   107→- Stores: lib/store/player.ts (queue+order+pos shuffle-aware engine, volume/mute/shuffle/repeat persist, add/remove queue), lib/store/navigation.ts (stack+future+tab), lib/store/ui.ts (nowPlaying/queue/searchQuery/libraryFilter)
+   108→   108→- lib/audio.ts singleton audio; player-engine.tsx wires events (ended→repeat/next, rAF progress, MediaSession + artwork + handlers, play-count POST)
+   109→   109→- components/spotify/: providers (react-query + theme + sonner), app-shell (h-dvh flex column: sidebar+main scroll / player / mobile nav), sidebar (logo, nav, playlist list, liked row), mobile-nav (3 tabs + safe area), top-bar (sticky, scroll-aware, back/forward desktop, avatar menu), player-bar (mobile mini w/ progress hairline + accent bg; desktop grid: track info, controls+seek, queue/volume), now-playing (fullscreen, drag-to-close via dragControls, animated cover, seek, big controls), queue-sheet (Sheet bottom/right), view-router (AnimatePresence + scroll reset)
+   110→   110→- ui-bits: slider (custom pointer-based, hover green), equalizer-bars, cover (image/gradient+icon), play-button, like-button, media-card, shelf (arrows), track-row (variants playlist/album, kebab menu w/ add-to-queue, go-to, like, add-to-playlist submenu, copy link, remove), create-playlist-dialog, play-helpers
+   111→   111→- hooks/queries.ts: all react-query hooks + mutations (toggleLike, addToPlaylist, createPlaylist, renamePlaylist, removeFromPlaylist, deletePlaylist)
+   112→   112→- Stub views created for Task 5
+   113→   113→
+   114→   114→Stage Summary:
+   115→   115→- App compiles (GET / 200), `bun run lint` clean, dev server running. Foundation ready for view components (Task 5).
+   116→   116→- View stubs: src/components/spotify/views/{home,search,library,liked,playlist,album,artist}-view.tsx
+   117→   117→
+   118→   118→---
+   119→   119→Task ID: 5
+   120→   120→Agent: full-stack-developer
+   121→   121→Task: Implement the 7 Spotify view components (replace stubs) + shared view helpers
+   122→   122→
+   123→   123→Work Log:
+   124→   124→- Read worklog + foundation (ui-bits, hooks/queries, stores, types, app-shell, view-router) before coding
+   125→   125→- New views/view-bits.tsx (shared helpers): LikedCover (purple gradient+heart), HeroGradient (full-bleed -inset-x-4/-top-[68px] overlay under TopBar), ShelfItemCard with in-based discrimination (image→artist, coverFrom→playlist, else album) + AlbumCard/PlaylistCard/ArtistCard (self-contained nav/play/playing state, reuse across home/search/discography/more-by), ShuffleButton (starts playback when context inactive, green + dot when active), SaveButton (local saved state + toast), TrackListHeader (#/Title/Album/Clock3 desktop header), skeleton set (QuickTile/Card/Shelf/Row/Hero/ArtistHero)
+   126→   126→- home-view.tsx: Liked Songs gradient shortcut tile first, quick-picks grid (2/3/4/5 cols, cover+name compact tiles), shelves via Shelf+ShelfItemCard, 8 skeleton tiles + 2 shelf skeletons while loading
+   127→   127→- search-view.tsx: debounced input (250ms) synced to ui.searchQuery, sticky search bar below TopBar w/ blur, 12 genre tiles (10 non-blue gradients, rotated Music2 corner icon, click fills query), desktop 2-col layout (top result card left / songs right) + full-width Artists/Albums/Playlists shelves below, TopResultCard with per-type cover (artist circle), hover play FAB, per-type play/toggle + navigation, "No results" empty state, loading skeletons
+   128→   128→- library-view.tsx: sticky filter chips (Playlists/Albums/Artists; clicking active chip returns to 'all'), mobile compact rows + md+ tile grid (1/2/3 cols, hover play FAB w/ focus-within), unified LibEntry list incl. purple Liked Songs entry, mobile-only CreatePlaylistDialog button (sidebar hidden on mobile), error/empty states, skeleton rows
+   129→   129→- liked-view.tsx: purple hero w/ full-bleed gradient, meta "You • N songs, X min", PlayButton+Shuffle (toggle-play if context active), TrackRow playlist variant w/ same-track toggle enhancement, empty state w/ "Find songs" → search tab
+   130→   130→- playlist-view.tsx: hero w/ coverFrom gradient (fallback #333), meta line, editable → kebab w/ Rename (Dialog+Input, useRenamePlaylist) and Delete (AlertDialog, useDeletePlaylist → back+setTab('library')); non-editable → SaveButton; desktop track header, onRemove on rows for editable playlists, empty-playlist CTA
+   131→   131→- album-view.tsx: accent-gradient hero, EP/ALBUM label, clickable artist in meta, kebab (add album to queue via addToQueue forEach, go to artist, copy link), album-variant TrackRows (numbers), "More by {artist}" shelf from useLibrary filtered by artist slug
+   132→   132→- artist-view.tsx: full-bleed portrait hero (-mt-[68px] -mx-4/-mx-6 under sticky TopBar, gradient-to-t from-base), PlayButton+Shuffle+FOLLOW (local state+toast)+kebab (copy link), Popular topTracks, Discography shelf (year•type subtitle), About card w/ image + line-clamp-4 + Read more toggle
+   133→   133→- Verified via agent-browser at 390px and 1280px: all 7 views render, nav/play flows work (active row turns green), filter chips, kebab menus, search flows incl. empty state; zero page errors
+   134→   134→- bun run lint: PASS (clean). tsc --noEmit: views clean. dev.log: GET / 200, compiles clean, all API routes 200
+   135→   135→
+   136→   136→Stage Summary:
+   137→   137→- All 7 views fully implemented, Spotify-accurate, mobile-first, keyboard-accessible, with loading skeletons and empty/error states. App verified end-to-end in a real browser. Known deviations (intentional, minor): shell already provides px-4/px-6 so view heroes don't double-pad; hero gradients bleed with -inset-x-4 and -top-[68px] (spec said inset-x-0/-top-16 — negative needed for true full-bleed under TopBar incl. wrapper pt-1); Liked shortcut tile shows heart+label (Spotify-accurate) rather than bare centered heart; library chips toggle back to 'all' on re-click; extra mobile "create playlist" button in library; artist About bio has Read more expander; same-track click in a playing context toggles pause instead of restarting. Foundation bugs found (NOT fixed, outside scope): tsc errors in api routes (PlaylistFull vs prisma select shape), now-playing.tsx/player-bar.tsx use track.album.accentSoft which AlbumRef lacks (runtime undefined — harmless), player-engine.tsx audio-possibly-null strictness, genre tile queries like "Synthwave" return 0 hits because search only matches entity text (no genre taxonomy).
+   138→   138→
+   139→   139→---
+   140→   140→Task ID: 6
+   141→   141→Agent: main (Z.ai Code)
+   142→   142→Task: Integration + type fixes after view layer build
+   143→   143→
+   144→   144→Work Log:
+   145→   145→- Fixed subagent-reported foundation issues:
+   146→   146→  - serialize.ts: structural PlaylistFull type (accepts select-shape includes) — resolves tsc errors in home/library/playlists/search routes
+   147→   147→  - types.ts + trackDTO: added accentSoft to AlbumRef (now-playing/player-bar gradients now get real colors)
+   148→   148→  - player-engine.tsx: cleanup closure restructured (audio null-narrowing fix)
+   149→   149→  - schema: added Album.genre; re-seeded (genre from audio-meta); search route matches genre + description; punctuation-insensitive matching (squish) so "lofi" matches "Lo-Fi Beats"
+   150→   150→  - queue-sheet.tsx: aria-describedby={undefined} (Radix warning fix)
+   151→   151→- Restarted dev server (needed to reload regenerated Prisma client)
+   152→   152→- bunx tsc --noEmit: clean (app code); bun run lint: clean
+   153→   153→
+   154→   154→Stage Summary:
+   155→   155→- App fully type-safe and compiling; genre search works ("Synthwave", "lofi" etc.)
+   156→   156→
+   157→   157→---
+   158→   158→Task ID: 7
+   159→   159→Agent: main (Z.ai Code)
+   160→   160→Task: Agent-browser E2E QA + visual review
+   161→   161→
+   162→   162→Work Log:
+   163→   163→- Mobile (390x844): home renders (quick picks + 6 shelves); Liked view + Play works — REAL audio verified (progress hairline 23.7%→32.6% over 3s)
+   164→   164→- NowPlaying fullscreen: opens from mini player, seek slider live, queue sheet opens with Next up + remove + clear, queue jump works, drag handle close
+   165→   165→- Search: sticky input, genre tiles, "lofi" → top result Cassette Cafe + shelves (after squish fix)
+   166→   166→- Album view: hero + tracks; row click plays (verified via JS click — agent-browser ref-click quirk hits the kebab, app itself works)
+   167→   167→- Desktop (1280x800): sidebar + library list, topbar back/forward, full player bar (seek/volume/queue/shuffle/repeat), auto-stop at queue end, manual resume works
+   168→   168→- No horizontal overflow on mobile (scrollWidth == clientWidth == 390); zero page errors; no console errors (only Radix warning → fixed)
+   169→   169→- VLM review of screenshots: 9-10/10 fidelity, no visual bugs; all images load (naturalWidth > 0)
+   170→   170→- Note: agent-browser `click @ref` on track rows can land on the kebab menu (tool quirk, not an app bug) — use element JS click for verification
+   171→   171→
+   172→   172→Stage Summary:
+   173→   173→- Golden paths verified end-to-end: navigation, playback (real audio), queue, shuffle/repeat controls UI, search, playlist/album/artist views, responsive layouts, sticky bottom player+nav. App is interactive and runnable.
+   174→   174→
+   175→   175→---
+   176→   176→Task ID: 8
+   177→   177→Agent: main (Z.ai Code)
+   178→   178→Task: Final verification + scheduled review job
+   179→   179→
+   180→   180→Work Log:
+   181→   181→- Final lint: PASS (zero errors). tsc: PASS. dev server: GET / 200, no runtime errors in dev.log
+   182→   182→- Created scheduled job (id 368862): every 15 minutes, payload kind=webDevReview, full English task description (assess → QA via agent-browser → fix bugs or add features → update this worklog)
+   183→   183→- Project complete for initial launch phase
+   184→   184→
+   185→   185→Stage Summary:
+   186→   186→- Spotify clone shipped: 38 procedurally-generated MP3 tracks, 12 albums, 12 artists, 12 playlists, full mobile-first player SPA
+   187→   187→- Next-phase candidates for the 15-min review agent: lyrics view, drag-to-reorder queue, recently-played shelf, artist radio, keyboard shortcuts, PWA manifest, share buttons, animated view transitions polish, playlist cover upload
+   188→   188→
+   189→   189→---
+   190→   190→Task ID: 9-a / 9-b
+   191→   191→Agent: main (Z.ai Code)
+   192→   192→Task: Integrate live YouTube Music data (user request: "our website should fetch and use data from youtube music")
+   193→   193→
+   194→   194→Work Log:
+   195→   195→- Probed YouTube Music Innertube API (WEB_REMIX client) from sandbox: search/home/artist/album/playlist/next ALL work; direct audio stream extraction is bot-blocked on datacenter IPs (LOGIN_REQUIRED / PO token) → playback stays on our 38 local audio files, mapped deterministically by videoId (durations match actual audio)
+   196→   196→- NEW src/lib/ytmusic.ts (~1000 lines): innertube caller (TTL cache, 9s abort), image fetcher (LRU 400) + vibrant accent extraction via sharp 10x10 bright-quadrant heuristic, robust recursive response walkers (collect/findVideoId/findBrowseId/pickThumb), RawItem extraction from listItem/twoRow/card renderers with kind-word classification ('Song'/'Album'/…), DTO mappers (ytTrackDTO/ytAlbumDTO/ytArtistDTO/ytPlaylistDTO/ytSinglePlaylistDTO), fetchers: ytSearch (flat + shelf layouts), ytHome, ytArtist (+by-name), ytAlbum (+single), ytPlaylist, ytSingle, nextVideoMeta (stash-warmed), videoStash for pseudo entities
+   197→   197→- NEW src/lib/yt-shadow.ts: ensureShadowTrack (persists Artist/Album/Track rows for YT tracks when liked/added to playlists → all existing machinery works), mergeLikedStates (overlay persisted liked state on live DTOs)
+   198→   198→- types.ts: + SourceKind ('local'|'youtube') optional source field on Track/Album/Playlist/Artist DTOs
+   199→   199→- Routes: NEW /api/yt/home (live shelves), /api/yt/img (image proxy, host allowlist, cached); /api/search + source=yt; /api/albums/[id] + /api/artists/[id] + /api/playlists/[id] GET handle yt- prefixed slugs; /api/tracks/[id]/like + /api/playlists/[id]/tracks POST accept {track} body for shadow rows; /api/tracks/[id]/play no-op for unshadowed yt ids
+   200→   200→- serialize.ts: source detection by id prefix
+   201→   201→- hooks/queries.ts: useSearch(query, source), useYtHome, useToggleLike/useAddToPlaylist now POST {track}
+   202→   202→- ID conventions: track `yt:{videoId}`/`yt-{videoId}`; album `yt:{MPREb}`/`yt-{MPREb}`; synth single `yt:al:single:{vid}`/`yt-single-{vid}`; artist `yt:{UC}`/`yt-{UC}` (name-only: `yt-ar-{slug}`); playlist `yt:{VL…}`/`yt-{VL…}`; pseudo-single playlist `yt:single:{vid}`/`yt-single-{vid}`
+   203→   203→- Smoke-tested live: search "daft punk" → 11 tracks/6 albums/6 artists/6 playlists with real play counts; artist Daft Punk (76.7M listeners, bio, 5 top songs, 12 albums); album Random Access Memories (13 tracks, real description); playlist Presenting Daft Punk (34 tracks); image proxy 200; like → shadow row → shows in /api/liked (then cleaned)
+   204→   204→- Bug fixes during testing: shelf contents wrapper unwrap (shelfListItems), kind-word classification (songs carry artist UC browseIds), album bare-list-item tracks, straplineTextOne artist, monthlyListenerCount runs parsing, vibrant accent fix (#111111 → real colors e.g. #184a5d TRON)
+   205→   205→
+   206→   206→Stage Summary:
+   207→   207→- Full live YouTube Music backend shipped and verified: search/home/artist/album/playlist/track pages + covers + accents + likes + playlist-adds all flow through our DTO layer. Local library untouched and still default elsewhere. Frontend integration (source toggle, home section, badges) remains — Task 9-c.
+   208→   208→
+   209→   209→---
+   210→   210→Task ID: 9-c
+   211→   211→Agent: full-stack-developer (completed by main after context timeout) 
+   212→   212→Task: Frontend integration of live YouTube Music data
+   213→   213→
+   214→   214→Work Log:
+   215→   215→- NEW ui-bits/yt-badge.tsx: tiny YouTube chip (inline, shrink-0, aria "From YouTube Music") reused across track rows/queue
+   216→   216→- search-view.tsx: source toggle (YouTube Music default / Your Library) — pill segmented control below sticky input (aria role=group, min-h-10); useSearch(query, source); YT error state card w/ "Search your library instead" CTA (CloudOff icon); genre heading swaps to "Explore genres on YouTube Music" for YT source; songs section renders YT tracks with badges (playTracks w/ real audio)
+   217→   217→- home-view.tsx: "From YouTube Music" section after local shelves — red Youtube icon + pulsing LIVE chip; useYtHome() w/ ShelfSkeleton loading, one-line muted error hint, shelves via Shelf + ShelfItemCard
+   218→   218→- track-row.tsx: YtBadge inline after title (truncate preserved via nested span + shrink-0)
+   219→   219→- now-playing.tsx: "YouTube Music" pill w/ Youtube icon under artist for YT tracks
+   220→   220→- queue-sheet.tsx: YtBadge on current + upcoming rows
+   221→   221→- view-bits.tsx: albumTypeLabel() helper (Album/EP/Single) used in AlbumCard default subtitle, album-view type label + More-by subtitles, artist-view discography subtitles
+   222→   222→- album-view.tsx: YT albums get "More by" from useArtist(album.artist.slug).albums (live artist discography) instead of local library filter
+   223→   223→- Fixed by main during integration: tsc error in fromListItem subKind extraction (unknown narrowing → firstSubRun var)
+   224→   224→
+   225→   225→Verification (main, agent-browser @ 390x844 + 1280x800):
+   226→   226→- Search "daft punk" (YT source): real results — top result Artist card (Daft Punk, 76.7M), Songs (I Feel It Coming/Veridis Quo/One More Time… w/ YT badges + real covers via /api/yt/img, 0 broken), Albums (Random Access Memories), Artists (The Weeknd), Playlists; all thumbnails naturalWidth>0
+   227→   227→- REAL AUDIO plays from YT rows (JS row click): player bar + VLM-verified now-playing fullscreen "0:18 / 0:40" with YouTube Music pill
+   228→   228→- Home: "From YouTube Music" LIVE section with real album art (New releases / Today's fresh & popular)
+   229→   229→- Library toggle: "aurora" → local Aurora Vex, 0 YT badges (source isolation works)
+   230→   230→- YT artist page: robot-helmet hero, top songs w/ badges, discography
+   231→   231→- YT album page: Random Access Memories, 13 songs, "More by Daft Punk" from live artist
+   232→   232→- Like flow: heart on YT row → /api/liked now includes "Giorgio by Moroder" (Daft Punk) + "Shayad" (Arijit Singh) with source:youtube; Liked view renders them on top w/ badges; "12 songs, 8 min"
+   233→   233→- bun run lint: PASS. bunx tsc --noEmit: app code clean. dev.log: all routes 200, no runtime errors
+   234→   234→- Known benign: 3 hydration attribute warnings from persisted player prefs (localStorage) — cosmetic only
+   235→   235→
+   236→   236→Stage Summary:
+   237→   237→- YouTube Music integration COMPLETE end-to-end: live search/home/artist/album/playlist data with real covers, accents, play counts; YT tracks playable (deterministic local audio), likeable, playlist-addable (shadow rows); YT badges across rows/queue/now-playing; source toggle defaults to YouTube Music. Local library fully intact.
+   238→   238→
+   239→   239→---
+   240→   240→Task ID: 10
+   241→   241→Agent: main (Z.ai Code)
+   242→   242→Task: Real YouTube Music audio streaming (user: "audio must be streamed through yt music … If direct access is not available, use unofficial open source services created by people")
+   243→   243→
+   244→   244→Work Log:
+   245→   245→- Probed every server-side audio route from this sandbox IP: raw InnerTube player (ANDROID/IOS/TV/WEB_EMBEDDED/WEB_REMIX incl. proper client headers) → bot-walled ("Sign in to confirm you're not a bot"); yt-dlp 2026.08.19 with all player clients → same; Piped instances (6) → NewPipe SignInConfirmNotBot; Invidious (11 official-list instances incl. latest_version companion endpoint) → dead/403/disabled; cobalt instances → auth/Cloudflare; public CORS proxies (7) → 403/429/522
+   246→   246→- Installed + ran the community PO-token stack (exactly the "unofficial open source services" route): cloned bgutil-ytdlp-pot-provider v2.0.0 into mini-services/bgutil-provider, `bun pm trust --all`, `bunx tsc`, provider UP on 127.0.0.1:4416 (see provider.log); pip installed yt-dlp + yt-dlp-ejs + bgutil-ytdlp-pot-provider plugin. Findings: PO tokens ARE minted and used (provider log proves it), but the web player API still returns LOGIN_REQUIRED from datacenter IPs — hard IP reputation block, tokens insufficient. Provider kept running as a mini-service (`cd mini-services/bgutil-provider/server && bun run dev` → `node --watch build/main.js -p 4416`); required for any future yt-dlp resolution
+   247→   247→- Discovered the WORKING audio path: the official YouTube IFrame embed player. Verified live in a real browser (agent-browser): muted autoplay reaches STATE 1 (playing); unmuted playback works after a user click (Chrome gesture propagation). Error 150 ("embed not allowed") is per-video policy: dQw4w9WgXcQ plays, VEVO/"Topic" uploads and Content-ID-matched user uploads mostly block embedding
+   248→   248→- NEW src/lib/playback/yt-engine.ts: IFrame API engine (script loader w/ 20s timeout, hidden 1px player, load/cue/play/pause/seek/volume/mute, state+duration+error events, __ytLog debug ring buffer)
+   249→   249→- Reworked src/lib/store/player.ts into an engine-agnostic intent store (isPlaying/seekRequest{t,nonce}/volume as intents; removed all direct audio calls)
+   250→   250→- Reworked src/components/spotify/player-engine.tsx into a dual-engine driver: local tracks → singleton <audio>; YouTube tracks → ytEngine. Handles: play/pause/seek/volume/mute routing, rAF progress from the active engine, MediaSession metadata+positionState+handlers, play-count POSTs, autoplay watchdog (6s nudge + one-time hint toast), fail-streak guard (4 failures → stop + toast)
+   251→   251→- Resolution chain for embed-blocked videos (101/150): mark videoId blocked (localStorage `yt-embed-blocked`, 600 cap) → fetch /api/yt/alternate (server searches YouTube Music for other uploads of the same song, ranks by normalized title, excludes blocked/known ids) → try up to 4 alternates in the embed (9s timeout each, promise-based) → fall back to /api/yt/stream/[videoId] server relay → else toast + auto-skip. Resolving-guard with 400ms retry loop prevents re-entrant handling during track skips
+   252→   252→- NEW /api/yt/stream/[videoId] route (tier-3 relay): yt-dlp subprocess (web client + POT provider + `--js-runtimes node`, 12s kill, m4a itag) → Invidious instance relay (live list from api.invidious.io, 30min cache, 5s timeout each) → 503 fast-fail with 10min cooldown; GET/HEAD with HTTP Range passthrough proxy for seeking. Currently returns 503 (all resolvers IP-blocked) but auto-recovers if any path revives
+   253→   253→- ytmusic.ts: removed the fake local-audio mapping (AUDIO_POOL/audioFor/djb2/fs import); track.file = `/api/yt/stream/{videoId}` (relay only); real durations via parseDurationSec(durationText) || durationFromRuns(subtitleRuns) || durationOverride; search now ALSO runs the songs-filtered search in parallel (params EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D) building a videoId→duration backfill map; track slice widened to songs(9)+videos(6); fromCard now respects "Song/Video • …" subtitle kind (fixes meme-artist misclassification — top result for Never Gonna Give You Up is now the real track yt:dQw4w9WgXcQ); ytHome shelves deduped by id
+   254→   254→- NEW /api/yt/alternate route (reuses cached ytSearch; NON_SONG filter for reaction/podcast/interview titles; top-result track prepended as best candidate)
+   255→   255→- eslint.config.mjs: ignore mini-services/** and tool-results/** (vendored provider repo lint noise)
+   256→   256→- format.ts: formatDuration(0) → "–:–" (honest placeholder while the engine learns the real duration)
+   257→   257→- Fixed React duplicate-key error in home shelves (server dedupe + index-suffixed keys)
+   258→   258→- dev server restart during QA (it died silently mid-session; restarted via nohup, GET / 200)
+   259→   259→
+   260→   260→Verification (agent-browser @ 390×844 and 1280×800):
+   261→   261→- REAL YouTube audio streams end-to-end: clicked "Never Gonna Give You Up" (topic upload lYBUbBu4W08, embed-blocked 150) → resolution chain fired → alternate dQw4w9WgXcQ reached STATE playing → progress hairline 6.8%→16.3%→23.6%, real duration 3:33 reported, now-playing fullscreen shows 1:02/3:33 elapsed/total
+   262→   262→- Player controls verified on YT engine: pause (state frozen, hairline frozen), resume, drag-seek on the custom slider (aria-valuenow 83→179, elapsed 3:07), queue auto-advance on ended (state 0 → next(true) → blocked next track resolves itself)
+   263→   263→- Engine handoff verified both ways: local playlist (Daily Mix 1 → "Neon Skyline") plays via <audio> WHILE ytEngine state = paused; switching back to a YT track reloads the embed
+   264→   264→- Desktop (1280×800): sidebar + desktop player bar (seek 444px, volume 96px sliders) + YT row click → playing
+   265→   265→- /api/yt/stream/{blocked-video} → 503 in 1.7s (fast-fail as designed); POST /api/tracks/yt:dQw4w9WgXcQ/play → 200
+   266→   266→- bun run lint: PASS; bunx tsc --noEmit: src/ clean; fresh-load console: zero errors
+   267→   267→- Known sandbox-only limitation: this datacenter IP gets error 150 on most label uploads (embed gating is IP-reputation-augmented). Real user browsers are far less gated (music embeds play on normal networks); the resolution chain covers the rest. Removed public/yt-embed-test.html QA page
+   268→   268→
+   269→   269→Stage Summary:
+   270→   270→- Audio now genuinely streams from YouTube: primary = official IFrame embed (YouTube-served audio), secondary = alternate-upload resolution (YouTube Music data), tertiary = server relay through open-source tooling (yt-dlp + bgutil POT provider + Invidious, currently IP-blocked but auto-recovering). The fake local-audio mapping is gone. Local demo library still plays through <audio>.
+   271→   271→- All playback UX is engine-agnostic: seek/progress/volume/shuffle/repeat/queue/MediaSession work identically for local and YouTube tracks.
+   272→   272→- Key services: Next.js dev server (port 3000) + bgutil POT provider mini-service (port 4416, `cd mini-services/bgutil-provider/server && bun run dev`).
+   273→   273→- Next-phase candidates: pre-resolve embeddable videoIds at search time (batch probe via a hidden YT player) to skip 150 latency entirely; queue/radio autoplay from related tracks (getWatchPlaylist); duration backfill for artist top tracks via the `next` endpoint; show "alternate upload" indicator chip on rows; playlist cover mosaics for YT tracks.
+   274→   274→
+   275→   275→---
+   276→   276→Task ID: 11
+   277→   277→Agent: main (Z.ai Code)
+   278→   278→Task: Remove all dummy local data (procedurally generated demo catalog) + remove every YouTube Music mention from the frontend; continue development
+   279→   279→
+   280→   280→User request: "we are fetching data from youtube so we dont need the dummy data anymore. Also it is not necessary to mention in the frontend that the data is from youtube music."
+   281→   281→
+   282→   282→Work Log:
+   283→   283→- DB CLEANUP: new scripts/remove-dummy-data.ts — wiped 12 demo playlists (93 links), 38 demo tracks, 12 albums, 12 artists; kept 2 liked YouTube shadow rows. Also fixed stale file paths on old shadow rows (/audio/*.mp3 → /api/yt/stream/{vid}). Remaining: 4 liked tracks, 1 user playlist (Road Trip, created during QA), their shadow albums/artists.
+   284→   284→- ASSETS REMOVED: public/audio (38 MP3s), public/covers, public/artists, scripts/{gen-audio,extract-accents,seed}.ts, scripts/{audio-meta,accents}.json. src has zero references to them (verified by grep).
+   285→   285→- /api/home REWRITTEN: pure live feed — ytHome() shelves + quickPicks = first 7 unique shelf items (playlists/albums/artists/songs) + "Made by you" shelf prepended when user playlists exist + likedCount. 502 on failure.
+   286→   286→- /api/library: playlists + liked only (no albums/artists). LibraryDTO slimmed accordingly.
+   287→   287→- /api/search: local search branch deleted — always live ytSearch + mergeLikedStates.
+   288→   288→- DE-BRANDED all user-visible strings: ytmusic.ts displayOwner()/subtitleOwner() helpers (owner "YouTube Music"/"Google"→"Spotify", real creator names otherwise), artist fallbacks→'Unknown artist'/'Artist', track fallback→'Track', single description→'Single'; yt-shadow.ts bio→'Artist', description→'Single'; player-engine toasts reworded ("This track is unavailable." etc.).
+   289→   289→- FRONTEND: home-view rewritten (QuickTile handles playlist/album/artist discrimination via `in` checks, error card with Try again + refetch, skeletons); search-view source toggle REMOVED (always live), "Browse all" heading, reworded error card with Try again; library-view rewritten (Liked + playlists only, filter chips removed, Spotify-style "Create your first playlist" empty state, mobile create button kept); album-view "More by" always from live artist discography (useLibrary removed); track-row/queue-sheet/now-playing: YtBadge + YouTube pill removed; yt-badge.tsx + /api/yt/home route + useYtHome hook deleted; ui store libraryFilter removed.
+   290→   290→- PLAYBACK ROBUSTNESS FIX (found during QA): tryEmbed previously abandoned embed-ACCEPTED videos that sat at "cued" (autoplay held back after 9s timeout) and marked them blocked forever. Now: 'cued' state → nudge ytEngine.play(); on chain success → ytEngine.play() + armAutoplayWatchdog(track).
+   291→   291→- SEARCH QUALITY FIX: podcast/episode uploads (e.g. "Smashing Security 73", artist field "Episode") no longer pollute song results — isEpisodeItem() filter (first subtitle segment 'episode'/'podcast' or "Episode N" title pattern) applied to the videos slice.
+   292→   292→- queries.ts: useSearch(query) (no source param), useYtHome removed, useHomeFeed staleTime 5min + retry 1.
+   293→   293→
+   294→   294→Verification (agent-browser @ 390×844 + 1280×800):
+   295→   295→- Home: live quick picks (7 tiles + Liked) + "Today's fresh & popular"/"New releases" shelves with real covers/creators; zero YouTube branding; error→retry path coded.
+   296→   296→- Search: "Browse all" genres; "never gonna give you up" → real results, podcast entries GONE (before: 3 podcast rows; after: only music).
+   297→   297→- REAL AUDIO STREAMING: native click on Rick Astley row → primary lYBUbBu4W08 blocked(150) → chain resolved alternate dQw4w9WgXcQ → state:playing, real duration 213.061s, progress 0:08→0:23→2:28 advancing; PAUSE (engine state:paused, frozen) + RESUME verified; queue auto-advance on 'ended' worked autonomously (advanced through blocked tracks to an embeddable remaster via alternate).
+   298→   298→- Like flow: heart on playing track → /api/liked grew 2→4 with correct entries. Create playlist "Road Trip" + kebab→Add to playlist → "Added to Road Trip" toast, API confirms 1 song, "Made by you" shelf on home.
+   299→   299→- Library: Liked Songs (4 songs) + Road Trip rows; playlists+liked empty state CTA coded.
+   300→   300→- Desktop: sidebar (Liked + Road Trip), full player bar, "Made by you" + live shelves.
+   301→   301→- VLM review of 3 screenshots: "very polished and authentic Spotify aesthetic", no broken images, NO YouTube/YouTube Music text visible anywhere.
+   302→   302→- bunx tsc --noEmit (src): clean. bun run lint: clean. Fresh-load console: zero errors. Mobile 390px: no horizontal overflow. dev.log: all routes 200.
+   303→   303→- NOTE for future QA: agent-browser eval-based .click() is UNTRUSTED (no user activation → unmuted autoplay stays blocked at 'cued'); use native `agent-browser click @ref` from snapshots for playback tests. Synthetic clicks on hidden desktop player-bar buttons also mis-route — snapshot refs are authoritative.
+   304→   304→
+   305→   305→Stage Summary:
+   306→   306→- The dummy demo catalog is fully gone: every piece of content (shelves, quick picks, search, artists, albums, playlists) is live YouTube Music data; the DB only holds user artifacts (liked shadow rows, user playlists + their shadow tracks).
+   307→   307→- The frontend is fully de-branded — no YouTube Music mentions, badges, source toggles, or attribution anywhere; editorial playlist owners map to "Spotify".
+   308→   308→- Playback chain hardened (cued-accept fix) and search de-polluted (podcast filter).
+   309→   309→- App state after QA: 4 liked songs, 1 user playlist "Road Trip" (1 track). 
+   310→   310→- Known sandbox-only limitation (unchanged): datacenter IP gets error 150 on most label uploads; the alternate-upload chain covers it (verified live: dQw4w9WgXcQ streamed). Real user networks are far less gated.
+   311→   311→- Next-phase candidates: pre-resolve embeddable videoIds at search time; lyrics view; artist radio (getWatchPlaylist autoplay); duration backfill for artist top tracks; queue drag-to-reorder; share buttons on shelves; recently-played quick picks from play history.
+   312→   312→
