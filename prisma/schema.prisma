@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Artist {
+  id              String   @id @default(cuid())
+  slug            String   @unique
+  name            String
+  image           String
+  bio             String   @default("")
+  monthlyListeners Int     @default(0)
+  createdAt       DateTime @default(now())
+  albums          Album[]
+  tracks          Track[]
+}
+
+model Album {
+  id          String  @id @default(cuid())
+  slug        String  @unique
+  title       String
+  cover       String
+  accent      String  @default("#535353")
+  accentSoft  String  @default("#121212")
+  year        Int     @default(2024)
+  type        String  @default("album") // album | ep | single
+  genre       String  @default("")
+  description String  @default("")
+  artistId    String
+  artist      Artist  @relation(fields: [artistId], references: [id], onDelete: Cascade)
+  tracks      Track[]
+
+  @@index([artistId])
+  @@index([year])
+}
+
+model Track {
+  id           String    @id @default(cuid())
+  slug         String    @unique
+  title        String
+  file         String
+  duration     Int       @default(0)
+  number       Int       @default(1)
+  plays        Int       @default(0)
+  liked        Boolean   @default(false)
+  likedAt      DateTime?
+  lastPlayedAt DateTime?
+  albumId      String
+  album        Album     @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  artistId     String
+  artist       Artist    @relation(fields: [artistId], references: [id], onDelete: Cascade)
+  playlists    PlaylistTrack[]
+  playLogs     PlayLog[]
+
+  @@index([albumId, number])
+  @@index([artistId])
+  @@index([liked])
+  @@index([plays])
+  @@index([lastPlayedAt])
+}
+
+model Playlist {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String?
+  cover       String?  // optional cover image url
+  coverFrom   String?  // gradient start hex
+  coverTo     String?  // gradient end hex
+  icon        String?  // lucide icon name for gradient covers
+  owner       String   @default("Spotify")
+  editable    Boolean  @default(false)
+  sort        Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tracks      PlaylistTrack[]
+
+  @@index([sort])
+}
+
+model PlaylistTrack {
+  id         String   @id @default(cuid())
+  playlistId String
+  trackId    String
+  position   Int
+  addedAt    DateTime @default(now())
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  track      Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@index([playlistId, position])
+}
+
+model Lyrics {
+  id           String   @id @default(cuid())
+  /** Track id the lyrics belong to (TrackDTO.id, e.g. "yt:dQw4w9WgXcQ") */
+  trackId      String   @unique
+  synced       Boolean  @default(false)
+  instrumental Boolean  @default(false)
+  /** JSON-encoded LyricLine[] */
+  lines        String
+  fetchedAt    DateTime @default(now())
+}
+
+
+/** One row per actual play event — powers the "Top played" stats view. */
+model PlayLog {
+  id       String   @id @default(cuid())
+  trackId  String
+  playedAt DateTime @default(now())
+  track    Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@index([playedAt])
+  @@index([trackId])
+}
