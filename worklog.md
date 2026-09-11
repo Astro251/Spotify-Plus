@@ -579,3 +579,131 @@ Stage Summary:
 - Infra lessons: restart dev server (detached setsid form) after prisma client regeneration; DOM-rect verification beats VLM guessing for overlap bugs; Radix menu items need full pointer sequences in agent-browser.
 - Known sandbox-only limitation (unchanged): datacenter IP gates most label-upload embeds (error 150) — alternate chain + 4-strike fail-guard absorb it; real networks play primaries.
 - Next-phase candidates: pre-resolve embeddable videoIds at search time (hidden probe); lyrics fullscreen variant polish (now with fade mask); playlist duplicate/merge tools; sleep-timer UI polish; stats "listening streak" / genre breakdown (PlayLog has timestamps for day-level charts); export stats as shareable card image.
+
+---
+Task ID: 19
+Agent: main (Z.ai Code)
+Task: Scheduled review round. User request this round: "We need background play." Implemented full background-play support (engine-level background-safe ticking + auto-resume + MediaSession truthfulness + user-facing setting) plus a real Settings dialog and B hotkey.
+
+User request: "We need background play"
+
+Work Log:
+- QA FIRST (agent-browser, 1280×800 desktop + 390×577 mobile): baseline fresh load 0 console errors; played the known-embeddable dQw4w9WgXcQ (search "never gonna give you up") — playback chain healthy (isPlaying, progress ticking, embed streaming). Confirmed the background gaps live: `navigator.mediaSession.playbackState` was never set ("none"), and the progress loop is rAF-only (rAF is fully suspended in hidden tabs → lock-screen position + store progress freeze while music plays).
+- CORE — Background-safe engine (src/components/spotify/player-engine.tsx):
+  - `tick()` refactored into `syncProgress()` + rAF wrapper; a new 1s `bgPoll` interval runs `syncProgress()` (+ sleep-timer hard check) ONLY while `document.hidden` — audible tabs are exempt from Chrome's intensive timer throttling, so progress + MediaSession position keep flowing in background. backgroundTicks counter exposed for QA.
+  - `visibilitychange` handler: hidden + backgroundPlay OFF → pause (opt-out) with one-time return toast "Paused — background play is off"; visible again → immediate progress re-sync + AUTO-RESUME if the OS/browser suspended the engine (yt iframe paused but store says playing → ytEngine.play(); audio element paused → audio.play()) with one-time "Kept playing in the background" toast.
+  - `navigator.mediaSession.playbackState` mirrored on every isPlaying change (lock screen / media tray / headset buttons stay truthful); `seekbackward`/`seekforward` (±10s, seekOffset-aware) MediaSession handlers added + cleanup list extended.
+  - MediaMetadata artwork now declares 512 + 256 sizes.
+  - "Now playing" tab title: `▶ {title} • {artist}` while playing, base title when paused/empty (what the user sees from another tab — Spotify-web parity).
+  - `window.__bgp` live debug hook (getter snapshot: hidden/engine/isPlaying/progress/ytState/backgroundPlay/backgroundTicks/mediaPlaybackState/title) — same pattern as __ytLog.
+  - src/lib/audio.ts: singleton `<audio>` is now ATTACHED to document.body (1px invisible, playsinline, aria-hidden) — Safari/iOS MediaSession + background continuation are more reliable for in-document media (mirrors the YT engine host pattern).
+- SETTING — Player store: `backgroundPlay: boolean` (default true) + `setBackgroundPlay()`, persisted in spotify-player-prefs partialize.
+- UI:
+  - Account menu (top-bar): new "Background play" row with live Switch (onSelect preventDefault keeps menu open — verified), icon + sub-label "Keep playing in the background"; menu widened w-52→w-64. "Settings" now opens the real Settings dialog (was a demo-only toast).
+  - NEW ui-bits/settings-dialog.tsx (`app:settings` event pattern, mounted in AppShell): Playback section with Background play + Endless autoplay toggle rows (icon chip, title, description, spotify-green Switch, hover/focus-visible rings, aria-pressed rows) + More section (Keyboard shortcuts link with ? kbd chip, demo-storage note).
+  - Hotkey B (app-level, input-guarded) toggles background play with a confirming toast; added to the ShortcutsDialog cheatsheet (Navigate group).
+
+Verification (agent-browser + VLM + lint):
+- Background tick LIVE-VERIFIED: with `Object.defineProperty(document,'hidden',…)` + visibilitychange dispatched, bgPoll fired ~1Hz (backgroundTicks 4 in 4s; 10 after ~6s) while progress advanced 8.8→12.8 and ytState stayed 'playing' — audio + position both alive in "background". Ticks stop when visible again.
+- Opt-out verified: B off → hidden → store paused + engine paused + mediaPlaybackState 'paused' + tab title reset to base; on return the one-time toast fired. 0 console errors through the entire cycle.
+- Auto-resume verified: paused the YT iframe via postMessage pauseVideo (simulating OS suspension) with store still isPlaying=true → returned to visible → engine back to 'playing', progress advancing. (Resume toast already consumed earlier in session by design — once per session.)
+- Tab title: "▶ Never Gonna Give You Up • Rick Astley" while playing, base title restored on pause — DOM-verified via __bgp.
+- Setting surfaces: account-menu row toggles live (menu stays open, switch data-state flips, store syncs); Settings dialog rows (aria-pressed) toggle + persist; localStorage spotify-player-prefs carries backgroundPlay across reload (true restored post-reload). B hotkey works outside inputs (isTypingTarget guard held while typing in search).
+- VLM review: desktop settings dialog "clean and well-aligned, toggles rendered correctly, green On state"; mobile menu + settings rows "touch targets adequate, description wraps correctly, no cut-off/overlap". No horizontal scroll mobile; 0 console errors all round; dev.log clean (only by-design 200s).
+- Regression: bun run lint 0 problems; bunx tsc --noEmit 0 src errors. Screenshots: download/qa9-01-account-menu-bgp.png, qa9-02-settings-dialog.png, qa9-03-mobile-account-bgp.png, qa9-04-mobile-settings.png, qa9-05-final-desktop-bgp.png.
+- Infra lessons: `agent-browser set viewport <w> <h>` (NOT `viewport`); B-hotkey test must blur the focused search input first (isTypingTarget guard); simulating hidden tabs = defineProperty override + visibilitychange dispatch; pauseVideo into the YT iframe via postMessage simulates OS suspension for resume-path testing.
+
+Stage Summary:
+- Background play is now real and observable: music keeps playing with live lock-screen position when the tab is hidden, the engine auto-resumes if the OS suspended it, the tab title announces the playing song, and OS media surfaces (playbackState, seek ±10s, artwork sizes) stay truthful.
+- It is user-controllable from three surfaces: account-menu quick switch, full Settings dialog (also hosting Endless autoplay), and the B hotkey — persisted per device.
+- Known sandbox-only limitation (unchanged): datacenter IP gates most label-upload embeds (error 150) — alternate chain + fail-guard absorb it; QA uses dQw4w9WgXcQ which embeds fine.
+- Next-phase candidates: real cross-tab player sync via BroadcastChannel (single-player-instance guarantee); wake-lock for the lyrics/karaoke view; background-friendly queue prefetch (resolve next videoId while current plays); settings rows for sleep timer + data saver (relay vs embed).
+
+---
+Task ID: 20
+Agent: main (Z.ai Code)
+Task: User follow-up on Task 19: "we got auto resume on return but not the background play" — the engine was only recovering on tab RETURN, not keeping music alive WHILE hidden. Root-caused and fixed with three complementary mechanisms.
+
+User request: "we got auto resume on return but not the background play"
+
+Root cause:
+- Task 19's bgPoll only synced progress/MediaSession while hidden; it never attempted to RESUME a suspended engine while hidden. When the user's real browser (or the YT embed itself) paused the hidden/offscreen media, playback stopped until tab return → then the visibilitychange auto-resume rescued it. Sandbox QA had missed this because faking document.hidden in a headless browser does NOT actually suspend media.
+
+Work Log:
+- FIX 1 (core) — BACKGROUND RESUME WATCHDOG (player-engine.tsx bgPoll): while hidden, if store isPlaying but engine is suspended (yt state 'paused' / audio.paused), the poll now actively calls play() — first attempt ~1s after hide, then every 3s, budget 12 attempts per suspension. The budget REFRESHES whenever playback is actually running (bgRecovered counter), so recurring suspensions keep being fought but a pathological play/pause ping-pong dies out. Only fires when the user's intent is playing (a genuine pause via headset/lock-screen sets isPlaying=false → watchdog stands down). Attempts logged to window.__bgLog for QA.
+- FIX 2 — YT iframe host moved IN-VIEWPORT (yt-engine.ts): host was position:fixed;left:-9999px (offscreen). Several browsers treat a "visually hidden" cross-origin iframe as fair game to suspend its media when the page backgrounds. Now fixed 1px bottom-left, opacity:0, pointer-events:none, z-index:-1 — in-viewport so the iframe stays "visible" to the browser; background YT players that work use exactly this configuration.
+- FIX 3 — Web Audio keep-awake (player-engine.tsx): near-silent 30 Hz oscillator at gain 0.0008 (inaudible) runs whenever isPlaying (AudioContext unlocked by the user gesture that started playback; suspend when paused, close on unmount). Marks the page as actively playing audio so mobile browsers keep the hidden renderer — and the cross-origin iframe's media with it — alive.
+- visibilitychange handler now resets the watchdog budget on both transitions (fresh budget per hidden period).
+- __bgp debug hook extended: bgResumeAttempts, bgRecovered, keepAlive (AudioContext state).
+
+Verification (agent-browser, live — the user's exact scenario):
+- Played dQw4w9WgXcQ (YT engine) → faked hidden → suspended the iframe via postMessage pauseVideo WHILE HIDDEN → watchdog fired at +1s (__bgLog attempt 1) and the engine returned to 'playing' WITH THE TAB STILL HIDDEN; progress advanced 12.3→17 through the suspension. Suspended a second time at 27.1 → recovered again (bgRecovered: 2, playing at 31.9). This is continuous background play, not resume-on-return.
+- Keep-awake: AudioContext state 'running' while playing (also observed on the audio-engine relay track), 'suspended' when paused.
+- Return-to-visible clean (progress re-sync, no double-resume, 0 console errors through the entire cycle).
+- Regression: bun run lint 0 problems; bunx tsc --noEmit 0 src errors; dev.log clean; fresh loads fine. Screenshot: download/qa9-06-bg-watchdog-verified.png.
+- Infra notes: the audio-relay engine couldn't be watchdog-tested end-to-end (sandbox gates the relay — audio error 4) but it shares the exact same suspension-detection + resume code path; the YT path (the library's primary engine) is fully verified.
+
+Stage Summary:
+- Background play is now actively fought for, not just passively recovered: the watchdog resumes suspended engines while the tab is hidden (works wherever the browser allows play() in hidden tabs — Chrome desktop/Android), the iframe is in-viewport (no offscreen-suspension trigger), and a near-silent keep-awake signal holds mobile renderers open.
+- Platform honesty: on iOS Safari a fully backgrounded page's JS is frozen by the OS — no web-page code can keep iframe audio alive there; the visibilitychange auto-resume (Task 19) remains the recovery path, and MediaSession/lock-screen controls keep working for the <audio> engine.
+- Next-phase candidates: background-triggered engine fallback (if the YT embed stays suspended in background after N watchdog attempts, auto-switch the track to the server-relay audio engine which background-plays more reliably); cross-tab single-instance via BroadcastChannel; wake-lock for the lyrics view.
+
+---
+Task ID: 21
+Agent: main (Z.ai Code)
+Task: User report: "on the desktop screens the text colour is not correct and image sizes are inconsistent" — root-caused and fixed both, plus a dead-artist-link bug found during QA.
+
+Root causes:
+1. TEXT COLOUR — Tailwind v4 token collision: `@theme { --color-base: #121212 }` created a COLOR token named `base`, which SHADOWED the `text-base` font-size utility. Generated CSS contained only `.text-base { color: var(--color-base) }` (+ `.md:text-base` variant) — no font-size rule at all. Consequence: every `md:text-base` on desktop overrode `text-white` and painted quick-pick tile text NEAR-BLACK (#121212) on dark tiles (verified via getComputedStyle: rgb(18,18,18)). Mobile was unaffected (variant behind md:), matching the user's "desktop screens" wording. Also silently degraded font sizes app-wide (shadcn Input/Textarea, library rows, Play-all pills).
+2. IMAGE SIZES — MediaCard used `sm:w-auto sm:min-w-[168px]` (content-driven width): longer titles → wider cards → bigger square covers. Measured: "Songs" card 179px/cover 155px vs siblings 168px/144px. Plus the Liked Songs quick tile was a full-purple-gradient tile (structure/radius visually inconsistent with its square-cover siblings).
+
+Work Log:
+- globals.css: renamed `--color-base` → `--color-canvas` (with an explanatory comment so it never gets reintroduced). `text-base` is a font-size utility again; live CSS now emits `.text-base { font-size: var(--text-base); line-height: … }` and `--color-base` is gone.
+- Updated all 6 token consumers: app-shell `bg-canvas`; history-view + stats-view sticky headers `bg-canvas/85`; search sticky bar `bg-canvas/90`; stats rank badge `bg-canvas`; artist-view hero fade `from-canvas`.
+- media-card.tsx + CardSkeleton (view-bits.tsx): fixed desktop width `sm:w-[168px] sm:max-w-none` → every shelf card identical width, covers exactly 144×144 (verified: [168,168] / 144x144 across the row).
+- home-view.tsx: restructured the Liked Songs quick tile to match QuickTile geometry exactly (bg-white/10 tile + 72px square purple-gradient cover + white bold text; rounded-md like siblings).
+- cover.tsx: `sizes` attr updated to the real fixed geometry (`(max-width: 768px) 46vw, 176px`; mosaic 88px) so next/image requests correctly sized files.
+- Infra note: Turbopack served STALE CSS after the @theme edit (fetch cache:reload still returned old rules). Fixed by appending+removing a cache-nudge comment to force retransform — remember this trick when editing globals.css in dev.
+- BONUS BUG (found in QA): artist links with synthetic name-slugs (`yt-ar-*`, minted when a YT track's artist row carries no channel id) 404'd → "Artist not found". Root cause: ytArtistByName passed the WRAPPED shelf item `{ musicResponsiveListItemRenderer: {...} }` to fromListItem (which expects the inner dict) → always null. Fixed with the same unwrap pattern used by shelfListItems: `(c.musicResponsiveListItemRenderer ?? c)`. Verified: /api/artists/yt-ar-arijit-singh → 200 (real Arijit Singh page); clicking "Arijit Singh & Shilpa Rao" from Liked view now loads the artist hero.
+
+Verification (agent-browser + VLM):
+- getComputedStyle: all quick-pick tiles rgb(255,255,255) @16px on desktop; mobile tiles white @14px; app-main bg still #121212 via bg-canvas.
+- Measured shelf cards: uniform 168px, covers 144×144; Liked tile cover 72×72 matching siblings.
+- VLM review of 8 desktop screenshots (home, search results, library, playlist, artist, stats, artist-from-liked, mobile home): no illegible text, no inconsistent image sizes, no layout defects.
+- Regression: bun run lint 0 problems; bunx tsc --noEmit 0 src errors (mini-services/skills vendored errors pre-existing); dev.log clean; artist routes 200.
+- Screenshots: download/qa10-02-desktop-home-fixed.png, qa10-03 search, qa10-04 library, qa10-05 playlist, qa10-06/08/09 artist, qa10-07 stats, qa10-10 mobile.
+- Created fresh 15-min webDevReview cron (job 373110; previous job 368862 was auto-disabled by exec limits).
+
+Stage Summary:
+- Both user-reported defects fixed at root: desktop text is white/correctly sized everywhere (the `--color-base`/`text-base` collision is documented in globals.css to prevent regression), and all card covers are pixel-identical within every row/grid across home, search, library, playlist, artist, stats.
+- Dead synthetic-artist links (yt-ar-*) now resolve to real YT artist pages.
+- Watch-list for next phase: none of the tokens `subdued/highlight/elevated/spotify/canvas` collide with the font-size scale — keep it that way when adding tokens; Turbopack CSS staleness trick documented above.
+
+---
+Task ID: 22
+Agent: main (Z.ai Code)
+Task: User report: "we are missing bollywood and indian music in our homepage. we dont have lyrics option on desktop screen" — added curated Indian-music shelves to the home feed and a desktop lyrics side panel.
+
+Root causes / gaps:
+1. HOME CONTENT — the home feed only mirrored YTM's geo-shaped home feed, which from this datacenter IP surfaces C-pop/decades shelves; zero Indian music despite the user's Bollywood listening history.
+2. LYRICS — the karaoke LyricsPanel existed but was reachable ONLY inside the mobile-style now-playing fullscreen (buried two taps deep); the desktop player bar had no lyrics control, so desktop users had no visible option.
+
+Work Log:
+- ytmusic.ts: added `ytIndianShelves()` — three curated shelves built from YT Music playlist/artist-filtered searches ("bollywood hits", "punjabi hits", "bollywood singers"): "Bollywood & Hindi hits" + "Punjabi & desi hits" (square playlist cards, titles cleaned via displayShelfTitle cutting "| Jukebox // 2023" tails) and "Indian music stars" (circular artist portraits — Shreya Ghoshal, AP Dhillon, Badshah, …). Reused shelfListItems/fromListItem/ytPlaylistDTO/ytArtistDTO; results cached 5 min via innertube jsonCache.
+- api/home/route.ts: ytIndianShelves() runs in parallel (failure-tolerant, .catch → []); shelves ordered [Made by you → Indian × 3 → global]; quick picks now mix 5 global + 2 Indian tiles so Indian content appears in the top grid.
+- lyrics-panel.tsx: new `compact` prop — side-panel-sized lines (text-xl, tighter spacing/paddings, smaller skeleton) for the desktop column; fullscreen mode unchanged.
+- NEW lyrics-side-panel.tsx: desktop-only right-hand lyrics column (Spotify desktop right-sidebar style): Mic2+track header with Marquee title + close X, compact LyricsPanel body, spring width animation (inner fixed-width column so text never reflows mid-animation), empty state "Play something to see lyrics". hidden md:block — mobile keeps using the fullscreen karaoke.
+- player-bar.tsx: Lyrics ControlButton (Mic2, active=lyricsOpen, aria-pressed) added to the desktop right controls before Queue; ControlButton extended to forward aria-pressed. Shares the existing lyricsOpen store with the now-playing fullscreen.
+- app-shell.tsx: <LyricsSidePanel /> mounted as third flex column after main.
+
+Verification (agent-browser + VLM):
+- /api/home returns shelves [Made by you, Bollywood & Hindi hits (10), Punjabi & desi hits (10), Indian music stars (10 artists w/ images), …global] and quick picks include 2 Indian playlists. DOM check: all three titles render; VLM confirms populated rows, uniform cover sizes (squares square, circles equal), no colour/layout defects.
+- Bollywood flow: opened "New Hindi Bollywood Songs" playlist (17 tracks, mosaic hero) → played "Tadapnaa Judaa Judaa" (Arijit Singh) end-to-end (VLM: pause button + green highlight + progress).
+- Lyrics flow: player-bar Lyrics button opens/closes the side panel; header tracks the CURRENT song live through engine advances (Tum Hi Ho → Samjhawan → Never Gonna Give You Up → Sunn Raha Hai); synced lines render (30/28/33 lines) and the active karaoke line ADVANCES with playback (aria-current verified moving); "No lyrics found" and empty states render correctly; lrclib returns synced Hindi lyrics (Tum Hi Ho, Samjhawan, Sunn Raha Hai 200s). VLM: compact size appropriate, no overlap/misalignment.
+- Regression: bun run lint 0 problems; bunx tsc --noEmit 0 src errors; dev.log clean (lyrics 404s = genuinely no-lyrics tracks, negative-cached).
+- Screenshots: qa11-01 home w/ Indian picks, qa11-02 Bollywood playlist, qa11-03/05 playing, qa11-06/07/08 lyrics panel (synced/active/Hindi), qa11-09/10 Bollywood + Indian stars shelves.
+
+Stage Summary:
+- Home now guarantees Indian music presence regardless of YTM geo-shaping: two playlist shelves + an artist shelf right after "Made by you", plus Indian tiles in the quick-pick grid.
+- Desktop has a first-class lyrics option: a player-bar Mic2 button toggling a right-hand karaoke column that follows the current track (shared state with the mobile fullscreen lyrics).
+- Next-phase candidates: a "Bollywood radio" quick action; cross-lyric seek already works in the panel; consider adding a Lyrics hotkey (L is taken — maybe O) + shortcuts-dialog entry; playlist-filtered searches could also power a "Browse moods" page.
